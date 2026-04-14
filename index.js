@@ -2,11 +2,16 @@ const express = require('express');
 const path = require('path');
 const app = express();
 
-// Render automatski dodeljuje port preko process.env.PORT
-const PORT = process.env.PORT || 3000;
+// Služi statičke fajlove (tvoj CSS, slike itd.)
+app.use(express.static(path.join(__dirname)));
 
-// Govorimo Express-u da koristi fajlove iz trenutnog foldera (za CSS i slike)
-app.use(express.static(__dirname));
-
-// Glavna ruta koja šalje tvoj index.html korisniku
+// Glavna runda koja otvara tvoj sajt
 app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Port koji Render zahteva
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
