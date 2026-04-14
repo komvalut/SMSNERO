@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMSNERO | Lightning SMS Service</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="container">
+        <div class="logo">SMS<span>NERO</span></div>
+        
+        <div class="input-group">
+            <label>Select Service</label>
+            <select id="service-select">
+                <option value="" disabled selected>Choose a service...</option>
+                <option value="telegram">Telegram</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="google">Google / YouTube</option>
+            </select>
+        </div>
+
+        <div class="input-group">
+            <label>Select Country</label>
+            <select id="country-select">
+                <option value="serbia">🇷🇸 Serbia</option>
+                <option value="usa">🇺🇸 USA</option>
+                <option value="germany">🇩🇪 Germany</option>
+            </select>
+        </div>
+
+        <div class="price-section">
+            <div class="price-display">
+                <span id="amount">—</span>
+                <span class="currency">sats</span>
+            </div>
+            <span class="status-text">Loading price...</span>
+        </div>
+
+        <button class="btn-generate" id="generate-btn">
+            ⚡ Generate Lightning Invoice
+        </button>
+
+        <div class="footer-links">
+            <a href="#">Support</a>
+            <a href="#">Refunds</a>
+            <a href="#">Terms</a>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
