@@ -3,44 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMSNERO | Lightning SMS Service</title>
+    <title>SMSNERO - Bitcoin SMS Gateway</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
     <div class="container">
-        <div class="logo">SMS<span>NERO</span></div>
+        <h1>SMSNERO ⚡</h1>
+        <p>Send anonymous SMS using Bitcoin Lightning Network</p>
         
-        <div class="input-group">
-            <label>Select Service</label>
-            <select id="service-select">
-                <option value="" disabled selected>Choose a service...</option>
-                <option value="telegram">Telegram</option>
-                <option value="whatsapp">WhatsApp</option>
-                <option value="google">Google / YouTube</option>
-            </select>
+        <div class="price-container">
+            <p>Current Price: <span id="price" class="sats-amount">Loading price...</span></p>
         </div>
 
-        <div class="input-group">
-            <label>Select Country</label>
-            <select id="country-select">
-                <option value="serbia">🇷🇸 Serbia</option>
-                <option value="usa">🇺🇸 USA</option>
-                <option value="germany">🇩🇪 Germany</option>
-            </select>
+        <div class="sms-form">
+            <input type="text" id="phone" placeholder="Phone number (e.g. +381...)" required>
+            <textarea id="message" placeholder="Your message here..." required></textarea>
+            <button class="btn-generate" id="generate-btn">
+                ⚡ Generate Lightning Invoice
+            </button>
         </div>
-
-        <div class="price-section">
-            <div class="price-display">
-                <span id="amount">—</span>
-                <span class="currency">sats</span>
-            </div>
-            <span class="status-text">Loading price...</span>
-        </div>
-
-        <button class="btn-generate" id="generate-btn">
-            ⚡ Generate Lightning Invoice
-        </button>
 
         <div class="footer-links">
             <a href="#">Support</a>
@@ -49,7 +30,35 @@
         </div>
     </div>
 
-    <script src="script.js"></script>
+    <script>
+    async function getPrice() {
+        try {
+            // Povlačimo cenu sa tvog API-ja na Renderu
+            const response = await fetch('/api/price');
+            const data = await response.json();
+            
+            // Tražimo element gde piše "Loading price..."
+            const priceElement = document.getElementById('price') || document.querySelector('.sats-amount'); 
+            
+            if (priceElement && data.price) {
+                // Upisujemo cenu i dodajemo "sats"
+                priceElement.innerText = data.price + " sats";
+            }
+        } catch (error) {
+            console.error("Greška pri učitavanju cene:", error);
+            const priceElement = document.getElementById('price') || document.querySelector('.sats-amount');
+            if (priceElement) priceElement.innerText = "Service temporarily unavailable";
+        }
+    }
+
+    // Pokreni funkciju čim se stranica učita
+    window.onload = getPrice;
+
+    // Dugme za generisanje fakture (osnova za kasnije)
+    document.getElementById('generate-btn').addEventListener('click', () => {
+        alert('Invoice generation coming soon! Check if price is loaded first.');
+    });
+    </script>
+
 </body>
 </html>
-
