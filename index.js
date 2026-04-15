@@ -8,20 +8,20 @@ app.use(express.static(path.join(__dirname)));
 
 const ALBY_TOKEN = process.env.ALBY_TOKEN ? process.env.ALBY_TOKEN.trim() : null;
 
-// Privremena memorija za poruke i uplate
+// Memorija za SMS poruke
 let smsDatabase = {}; 
 
-// RUTA ZA TVOJ SMS FORWARDER (Unesi ovaj URL u aplikaciju)
+// RUTA ZA SMS FORWARDER (Telefon gađa ovo)
 app.post('/api/incoming-sms', (req, res) => {
     const { from, message } = req.body; 
     console.log(`Stigao SMS od: ${from}, Sadržaj: ${message}`);
     
-    // Čuvamo poruku. 'from' je broj koji je poslao SMS (npr. "Google" ili "+46...")
+    // Čuvamo poruku pod ključem broja pošiljaoca
     smsDatabase[from] = message;
     res.status(200).send("OK");
 });
 
-// PRAVLJENJE RAČUNA
+// PRAVLJENJE RAČUNA (Alby)
 app.post('/api/make-invoice', async (req, res) => {
     try {
         const { amount, memo } = req.body;
@@ -43,13 +43,13 @@ app.get('/api/check-payment/:hash', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Check error" }); }
 });
 
-// KUPAC TRAŽI SVOJ KOD
+// ISPORUKA KODA KUPCU (Uzima najnoviju poruku iz baze)
 app.get('/api/get-my-code/:serviceName', (req, res) => {
-    const service = req.params.serviceName; // Npr. "Telegram" ili "+447..."
-    const foundMsg = Object.keys(smsDatabase).find(key => key.includes(service) || smsDatabase[key].includes(service));
-    
-    if (foundMsg) {
-        res.json({ code: smsDatabase[foundMsg] });
+    const messages = Object.values(smsDatabase);
+    if (messages.length > 0) {
+        // Dajemo kupcu APSOLUTNO poslednju poruku koja je stigla na server
+        const lastMessage = messages[messages.length - 1];
+        res.json({ code: lastMessage });
     } else {
         res.json({ code: null });
     }
