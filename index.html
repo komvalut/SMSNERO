@@ -1,94 +1,28 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMSNERO - P2P SMS Market</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>SMSNERO <span class="orange-text">⚡</span></h1>
-            <div class="status-badge"><span class="dot"></span> Node: <span class="green-text">Online</span></div>
-        </div>
-
-        <div class="main-nav">
-            <button class="nav-btn active" onclick="showTab('otp')">RECEIVE</button>
-            <button class="nav-btn" onclick="showTab('p2p')">P2P MARKET</button>
-            <button class="nav-btn" onclick="showTab('rent')">RENT</button>
-        </div>
-
-        <div id="otp-section" class="tab-content active">
-            <div class="sms-card">
-                <h3>Buy OTP Code</h3>
-                <div class="input-group">
-                    <label>Service</label>
-                    <select id="service-select">
-                        <option value="telegram">Telegram</option>
-                        <option value="whatsapp">WhatsApp</option>
-                        <option value="google">Google</option>
-                    </select>
-                </div>
-                <div class="input-group">
-                    <label>Country</label>
-                    <select id="country-select">
-                        <option value="rs">Serbia 🇷🇸</option>
-                        <option value="de">Germany 🇩🇪</option>
-                        <option value="us">USA 🇺🇸</option>
-                    </select>
-                </div>
-                <div class="price-section">
-                    <h2 id="price-display">1200 <span class="orange-text">sats</span></h2>
-                </div>
-                <button class="btn-generate">⚡ GET NUMBER</button>
-            </div>
-        </div>
-
-        <div id="p2p-section" class="tab-content">
-            <div class="sms-card">
-                <h3>P2P SMS Market</h3>
-                <p class="small-text">Buy SMS from private sellers</p>
-                <div class="p2p-list" id="my-numbers-list">
-                    <div class="number-item">
-                        <span>🇷🇸 +381 64 XXX XXXX</span>
-                        <button class="buy-small">500 sats</button>
-                    </div>
-                    <div class="number-item">
-                        <span>🇷🇸 +381 61 TEST BR</span>
-                        <button class="buy-small">450 sats</button>
-                    </div>
-                </div>
-                <p style="margin-top: 15px; font-size: 11px; color: #555;">Sellers: Alby Connected</p>
-            </div>
-        </div>
-
-        <div id="rent-section" class="tab-content">
-            <div class="sms-card">
-                <h3>Rent Number</h3>
-                <p>Long-term availability (30 days)</p>
-                <div class="price-section">
-                    <h2>25,000 <span class="orange-text">sats</span></h2>
-                </div>
-                <button class="btn-generate">⚡ RENT NOW</button>
-            </div>
-        </div>
-
-        <div class="footer">
-            <a href="#">Support</a> | <a href="#">My History</a>
-        </div>
+<div id="p2p-section" class="tab-content">
+    
+    <div class="admin-panel" style="background: #111; border: 1px dashed #ff9500; padding: 15px; border-radius: 15px; margin-bottom: 20px;">
+        <h4 style="color: #ff9500; margin-top: 0;">🛠 Admin: Add My Number</h4>
+        <input type="text" id="new-number" placeholder="+381 6..." style="width: 60%; padding: 8px; border-radius: 5px; border: 1px solid #333; background: #000; color: #fff;">
+        <input type="number" id="new-price" placeholder="sats" style="width: 30%; padding: 8px; border-radius: 5px; border: 1px solid #333; background: #000; color: #fff;">
+        <button onclick="addNumberToList()" style="width: 100%; margin-top: 10px; background: #ff9500; border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer;">
+            POST TO MARKET
+        </button>
     </div>
 
-    <script>
-        function showTab(tabName) {
-            // Skloni sve sekcije
-            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
-            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            
-            // Prikaži kliknutu
-            document.getElementById(tabName + '-section').classList.add('active');
-            event.currentTarget.classList.add('active');
-        }
-    </script>
-</body>
-</html>
+    <div class="sms-card">
+        <h3>P2P SMS Market</h3>
+        <p class="small-text">Verified Sellers & Escrow Protection</p>
+        
+        <div class="p2p-list" id="p2p-market-list">
+            <div class="number-item">
+                <span>🇷🇸 +381 61 TEST BR</span>
+                <button class="buy-small" onclick="testPay()">1 sat</button>
+            </div>
+        </div>
+
+        <div id="waiting-area" style="display:none; margin-top:20px;">
+            <p class="orange-text">Waiting for Code...</p>
+            <div class="code-box">_ _ _ _ _ _</div>
+        </div>
+    </div>
+</div>
