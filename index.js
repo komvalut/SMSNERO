@@ -1,17 +1,64 @@
-const express = require('express');
-const path = require('path');
-const app = express();
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMSNERO - Bitcoin SMS Gateway</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>SMSNERO ⚡</h1>
+        <p>Send anonymous SMS using Bitcoin Lightning Network</p>
+        
+        <div class="price-container">
+            <p>Current Price: <span id="price" class="sats-amount">Loading price...</span></p>
+        </div>
 
-// Služi statičke fajlove (tvoj CSS, slike itd.)
-app.use(express.static(path.join(__dirname)));
+        <div class="sms-form">
+            <input type="text" id="phone" placeholder="Phone number (e.g. +381...)" required>
+            <textarea id="message" placeholder="Your message here..." required></textarea>
+            <button class="btn-generate" id="generate-btn">
+                ⚡ Generate Lightning Invoice
+            </button>
+        </div>
 
-// Glavna runda koja otvara tvoj sajt
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
+        <div class="footer-links">
+            <a href="#">Support</a>
+            <a href="#">Refunds</a>
+            <a href="#">Terms</a>
+        </div>
+    </div>
 
-// Port koji Render zahteva
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-    console.log("Server is running on port " + PORT);
-});
+    <script>
+    async function getPrice() {
+        try {
+            // Povlačimo cenu sa tvog API-ja na Renderu
+            const response = await fetch('/api/price');
+            const data = await response.json();
+            
+            // Tražimo element gde piše "Loading price..."
+            const priceElement = document.getElementById('price') || document.querySelector('.sats-amount'); 
+            
+            if (priceElement && data.price) {
+                // Upisujemo cenu i dodajemo "sats"
+                priceElement.innerText = data.price + " sats";
+            }
+        } catch (error) {
+            console.error("Greška pri učitavanju cene:", error);
+            const priceElement = document.getElementById('price') || document.querySelector('.sats-amount');
+            if (priceElement) priceElement.innerText = "Service temporarily unavailable";
+        }
+    }
+
+    // Pokreni funkciju čim se stranica učita
+    window.onload = getPrice;
+
+    // Dugme za generisanje fakture (osnova za kasnije)
+    document.getElementById('generate-btn').addEventListener('click', () => {
+        alert('Invoice generation coming soon! Check if price is loaded first.');
+    });
+    </script>
+
+</body>
+</html>
