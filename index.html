@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMSNERO ⚡ AUTOMATED</title>
+    <title>SMSNERO ⚡ QR READY</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         body { background: #0b0b0b; color: #eee; font-family: sans-serif; display: flex; justify-content: center; padding: 20px; }
@@ -12,7 +12,7 @@
         input { width: 90%; padding: 10px; margin: 10px 0; background: #000; border: 1px solid #333; color: #fff; border-radius: 5px; }
         .btn { background: #ff9500; color: #000; border: none; padding: 12px; width: 100%; border-radius: 8px; font-weight: bold; cursor: pointer; }
         #status-box { display: none; margin-top: 20px; padding: 15px; border: 1px dashed #ff9500; border-radius: 10px; background: #000; }
-        #qrcode { background: white; padding: 10px; display: inline-block; margin: 15px 0; border-radius: 10px; }
+        #qrcode { background: white; padding: 15px; display: inline-block; margin: 15px 0; border-radius: 10px; }
         .loader { color: #888; font-size: 12px; margin-top: 10px; }
     </style>
 </head>
@@ -31,9 +31,11 @@
 
         <div id="status-box">
             <p id="msg" class="orange" style="font-weight: bold;">SCAN TO PAY:</p>
+            
             <div id="qrcode"></div>
+            
             <textarea id="inv" readonly style="width:100%; height:50px; background:#111; color:#ff9500; border:none; font-size:9px; margin-top:10px;"></textarea>
-            <div id="loading-msg" class="loader">Waiting for payment...</div>
+            <div id="loading-msg" class="loader">After payment, wait for the code.</div>
         </div>
     </div>
 
@@ -52,7 +54,7 @@
         async function startBuy(amt, phone) {
             document.getElementById('status-box').style.display = "block";
             document.getElementById('qrcode').innerHTML = ""; 
-            document.getElementById('loading-msg').innerHTML = "Generating QR...";
+            document.getElementById('loading-msg').innerHTML = "Generating QR code...";
 
             try {
                 const res = await fetch('/api/make-invoice', {
@@ -62,15 +64,18 @@
                 });
                 const data = await res.json();
                 
+                // Generisanje QR koda - Novi, čistiji parametri
                 new QRCode(document.getElementById("qrcode"), {
-                    text: data.payment_request,
-                    width: 180,
-                    height: 180,
+                    text: data.payment_request.toUpperCase(), // Lightning kodovi se lakše čitaju kao velika slova
+                    width: 250,  // Povećali smo dimenziju za bolji fokus
+                    height: 250,
                     colorDark : "#000000",
-                    colorLight : "#ffffff"
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.L // Smanjujemo nivo greške da QR bude manje "gust"
                 });
 
                 document.getElementById('inv').value = data.payment_request;
+                document.getElementById('loading-msg').innerHTML = "Scan to pay with any Lightning wallet";
                 checkPay(data.payment_hash, phone);
             } catch (e) {
                 document.getElementById('loading-msg').innerHTML = "Error creating invoice.";
@@ -85,8 +90,8 @@
                     clearInterval(i);
                     document.getElementById('qrcode').style.display = "none";
                     document.getElementById('inv').style.display = "none";
-                    document.getElementById('msg').innerHTML = "✅ PAID!";
-                    document.getElementById('loading-msg').innerHTML = "Waiting for SMS code...";
+                    document.getElementById('msg').innerHTML = "✅ PAYMENT RECEIVED!";
+                    document.getElementById('loading-msg').innerHTML = "Waiting for SMS code from your phone...";
                     waitForSMS(phone);
                 }
             }, 3000);
@@ -102,6 +107,7 @@
                         <div style="background:#000; border:2px solid #00ff00; padding:20px; border-radius:10px;">
                             <h2 style="color:#00ff00; margin:0;">YOUR CODE ⚡</h2>
                             <p style="font-size:22px; font-weight:bold; color:#fff; margin:15px 0;">${d.code}</p>
+                            <p style="font-size:11px; color:#888;">Order successfully completed!</p>
                         </div>
                     `;
                 }
