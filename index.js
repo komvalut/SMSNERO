@@ -6,24 +6,27 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
+// Clean up the Token from Environment Variables
 const ALBY_TOKEN = process.env.ALBY_TOKEN ? process.env.ALBY_TOKEN.trim() : null;
 
+// Temporary database for incoming codes
 let smsDatabase = {}; 
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// SMS FORWARDER RUTA
+// 📩 ENDPOINT FOR SMS FORWARDER APP
 app.post('/api/incoming-sms', (req, res) => {
     const { from, message } = req.body; 
-    console.log(`STIGAO SMS -> Od: ${from}, Poruka: ${message}`);
-    // Čuvamo poruku pod ključem "last", tako je najsigurnije za test
+    console.log(`NEW SMS RECEIVED -> From: ${from}, Content: ${message}`);
+    
+    // We store the message globally for the "last" request
     smsDatabase["last"] = message; 
     res.status(200).send("OK");
 });
 
-// KREIRANJE FAKTURE
+// ⚡ CREATE LIGHTNING INVOICE
 app.post('/api/make-invoice', async (req, res) => {
     try {
         const response = await axios.post('https://api.getalby.com/invoices', 
@@ -37,24 +40,29 @@ app.post('/api/make-invoice', async (req, res) => {
     }
 });
 
-// PROVERA UPLATE - POBOLJŠANA
+// 🔍 CHECK PAYMENT STATUS (Improved detection)
 app.get('/api/check-payment/:hash', async (req, res) => {
     try {
         const response = await axios.get(`https://api.getalby.com/invoices/${req.params.hash}`, {
             headers: { 'Authorization': `Bearer ${ALBY_TOKEN}` }
         });
-        // Logujemo u konzolu da vidimo šta Alby kaže
-        console.log("Status uplate:", response.data.settled);
-        res.json({ settled: response.data.settled });
-    } catch (e) { res.status(500).json({ settled: false }); }
+        
+        // Check for any sign of successful payment
+        const isPaid = response.data.settled || response.data.state === 'SETTLED' || response.data.status === 'paid';
+        
+        console.log(`Payment Status for ${req.params.hash.substring(0,8)}: ${isPaid}`);
+        res.json({ settled: isPaid });
+    } catch (e) { 
+        res.json({ settled: false }); 
+    }
 });
 
-// ISPORUKA KODA
+// 🔑 DELIVER CODE TO CUSTOMER
 app.get('/api/get-my-code/:phone', (req, res) => {
-    const kod = smsDatabase["last"]; 
-    if (kod) {
-        res.json({ code: kod });
-        // Brišemo kod nakon što ga kupac preuzme da ne bi ostao za sledećeg
+    const latestCode = smsDatabase["last"]; 
+    if (latestCode) {
+        res.json({ code: latestCode });
+        // Clear it after delivery so it's only used once
         smsDatabase["last"] = null;
     } else {
         res.json({ code: null });
@@ -62,4 +70,6 @@ app.get('/api/get-my-code/:phone', (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("🚀 Server aktivan na portu " + PORT));
+app.listen(PORT, () => {
+    console.log("🚀 SMSNERO Server is LIVE on port " + PORT);
+});
