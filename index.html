@@ -6,43 +6,39 @@
     <title>SMSNERO ⚡</title>
     <style>
         body { background: #0b0b0b; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .box { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
+        .box { width: 100%; max-width: 380px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
         .btn { background: #ff9500; color: black; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 20px; }
-        #status { margin-top: 20px; color: #ff9500; font-size: 14px; min-height: 20px; }
-        .code-display { font-size: 28px; color: #ff9500; font-weight: bold; margin-top: 20px; border: 2px dashed #ff9500; padding: 15px; display: none; background: #000; }
+        #status { margin-top: 20px; color: #ff9500; font-size: 14px; }
+        .code-display { font-size: 20px; color: #ff9500; font-weight: bold; margin-top: 20px; border: 2px dashed #ff9500; padding: 15px; display: none; background: #000; word-wrap: break-word; }
     </style>
 </head>
 <body>
     <div class="box">
         <h1>SMSNERO ⚡</h1>
         <p>Test Price: 1 sat</p>
-        <button class="btn" id="buy-btn" onclick="initiateBuy()">BUY SMS CODE</button>
+        <button class="btn" id="buy-btn" onclick="startPay()">BUY SMS CODE</button>
         <div id="status"></div>
         <div id="code-res" class="code-display"></div>
     </div>
 
     <script>
-        async function initiateBuy() {
+        async function startPay() {
             const statusDiv = document.getElementById('status');
             statusDiv.innerText = "Connecting to Swiss Pay...";
-            
             try {
-                // Pozivamo tvoj backend na Renderu
                 const res = await fetch('/api/make-invoice', { method: 'POST' });
                 const data = await res.json();
-                
                 if (data.payment_url) {
-                    statusDiv.innerText = "Redirecting...";
                     window.location.href = data.payment_url;
                 } else {
-                    statusDiv.innerText = "Error: " + (data.error || "Check API Key");
+                    statusDiv.innerText = "Error: Check API Key.";
                 }
             } catch (e) {
-                statusDiv.innerText = "Server error. Try again.";
+                statusDiv.innerText = "Connection failed.";
             }
         }
 
-        // Svake 3 sekunde proverava da li je stigao SMS
+        // Proverava kod svake 3 sekunde
         setInterval(async () => {
             try {
                 const res = await fetch('/api/get-my-code');
@@ -54,9 +50,7 @@
                     document.getElementById('status').innerText = "✅ SUCCESS!";
                     document.getElementById('buy-btn').style.display = "none";
                 }
-            } catch (e) {
-                console.log("Waiting for code...");
-            }
+            } catch (e) {}
         }, 3000);
     </script>
 </body>
