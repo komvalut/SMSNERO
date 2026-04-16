@@ -5,85 +5,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMSNERO ⚡</title>
     <style>
-        body { background: #0b0b0b; color: #eee; font-family: sans-serif; text-align: center; padding: 20px; }
-        .container { max-width: 400px; margin: 40px auto; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #222; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        .orange { color: #ff9500; }
-        input { width: 90%; padding: 12px; margin: 10px 0; background: #000; border: 1px solid #333; color: #fff; border-radius: 8px; text-align: center; }
-        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 16px; }
-        .btn:hover { background: #ffa522; transform: translateY(-2px); }
-        #status-area { display: none; margin-top: 25px; padding: 15px; border: 1px dashed #444; border-radius: 10px; }
-        .code-box { background: #000; border: 2px solid #00ff00; padding: 20px; border-radius: 10px; color: #00ff00; font-size: 24px; font-weight: bold; margin-top: 10px; letter-spacing: 3px; }
+        body { background: #0b0b0b; color: #eee; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
+        input { width: 90%; padding: 12px; margin: 10px 0; background: #000; border: 1px solid #444; color: #fff; border-radius: 8px; }
+        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; }
+        #status { margin-top: 20px; color: #ff9500; font-size: 14px; min-height: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>SMSNERO <span class="orange">⚡</span></h1>
-        <p style="color: #888;">Instant SMS Verification</p>
-        
-        <input type="text" id="phone_num" placeholder="Enter Phone Number">
-        <button class="btn" onclick="startProcess()">BUY SMS CODE (1 sat)</button>
-
-        <div id="status-area">
-            <p id="status-text">Creating invoice...</p>
-        </div>
+        <h1>SMSNERO <span style="color:#ff9500">⚡</span></h1>
+        <p>Testing Mode (1 Sat)</p>
+        <input type="text" id="phone" placeholder="Enter phone number">
+        <button class="btn" onclick="start()">BUY CODE</button>
+        <div id="status"></div>
     </div>
 
     <script>
-        let invoiceId = null;
-
-        async function startProcess() {
-            const phone = document.getElementById('phone_num').value;
-            if(!phone) return alert("Enter number!");
-
-            document.getElementById('status-area').style.display = "block";
+        async function start() {
+            const phone = document.getElementById('phone').value;
+            if(!phone) return alert("Phone required!");
+            
+            document.getElementById('status').innerText = "Creating invoice...";
             
             try {
                 const res = await fetch('/api/make-invoice', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ amount: 1 })
+                    body: JSON.stringify({ amount: 1, phone: phone })
                 });
                 const data = await res.json();
                 
-                invoiceId = data.id;
-                
-                // Otvara plaćanje u novom prozoru, ali prati ovde
-                window.open(data.payment_url, '_blank');
-                
-                document.getElementById('status-text').innerHTML = "Invoice created! <br><br> <span class='orange'>Please complete the payment in the new window.</span> <br><br> Waiting for payment...";
-                
-                checkPayment();
+                if(data.payment_url) {
+                    // Ovo te šalje na plaćanje u istom prozoru
+                    window.location.href = data.payment_url;
+                } else {
+                    document.getElementById('status').innerText = "Error creating payment.";
+                }
             } catch (e) {
-                document.getElementById('status-text').innerText = "Error creating invoice.";
+                document.getElementById('status').innerText = "Server error.";
             }
-        }
-
-        function checkPayment() {
-            const i = setInterval(async () => {
-                const res = await fetch('/api/check-payment/' + invoiceId);
-                const data = await res.json();
-                
-                if(data.settled) {
-                    clearInterval(i);
-                    document.getElementById('status-text').innerText = "✅ Paid! Waiting for SMS code...";
-                    waitForSms();
-                }
-            }, 3000);
-        }
-
-        function waitForSms() {
-            const i = setInterval(async () => {
-                const res = await fetch('/api/get-my-code');
-                const data = await res.json();
-                
-                if(data.code) {
-                    clearInterval(i);
-                    document.getElementById('status-area').innerHTML = `
-                        <p style="color: #00ff00;">SMS RECEIVED!</p>
-                        <div class="code-box">${data.code}</div>
-                    `;
-                }
-            }, 2000);
         }
     </script>
 </body>
