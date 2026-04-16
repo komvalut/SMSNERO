@@ -1,44 +1,60 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMSNERO ⚡</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #0b0b0b; color: white; font-family: sans-serif; text-align: center; padding: 50px 20px; }
-        .box { max-width: 350px; margin: auto; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; }
-        .btn { background: #ff9500; color: black; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; }
-        #status { margin-top: 20px; color: #ff9500; font-weight: bold; }
+        body { background: #0b0b0b; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .box { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
+        .btn { background: #ff9500; color: black; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 20px; }
+        #status { margin-top: 20px; color: #ff9500; font-size: 14px; min-height: 20px; }
+        .code-display { font-size: 32px; color: #ff9500; font-weight: bold; margin-top: 20px; border: 2px dashed #ff9500; padding: 10px; display: none; }
     </style>
 </head>
 <body>
-    <div class="box">
+    <div class="box" id="main-box">
         <h1>SMSNERO ⚡</h1>
-        <p>Price: 1 sat</p>
-        <button class="btn" onclick="buy()">BUY SMS CODE</button>
+        <p>Test Price: 1 sat</p>
+        <button class="btn" id="buy-btn" onclick="initiateBuy()">BUY SMS CODE</button>
         <div id="status"></div>
+        <div id="code-res" class="code-display"></div>
     </div>
 
     <script>
-        let invoiceId = null;
-
-        async function buy() {
-            document.getElementById('status').innerText = "Creating invoice...";
+        async function initiateBuy() {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerText = "Connecting to Swiss Pay...";
+            
             try {
                 const res = await fetch('/api/make-invoice', { method: 'POST' });
                 const data = await res.json();
-                if(data.payment_url) {
-                    invoiceId = data.id;
-                    window.location.href = data.payment_url; // Šalje te na plaćanje
+                
+                if (data.payment_url) {
+                    statusDiv.innerText = "Redirecting to payment...";
+                    window.location.href = data.payment_url;
+                } else {
+                    statusDiv.innerText = "Error: Could not create invoice.";
                 }
-            } catch (e) { document.getElementById('status').innerText = "Error!"; }
+            } catch (e) {
+                statusDiv.innerText = "Server error. Try again.";
+            }
         }
 
-        // Proverava kod čim se vratiš sa plaćanja
+        // Automatska provera da li je stigao SMS kod
         setInterval(async () => {
-            const res = await fetch('/api/get-my-code');
-            const data = await res.json();
-            if(data.code) {
-                document.querySelector('.box').innerHTML = `<h1>YOUR CODE:</h1><h1 style="color:#ff9500">${data.code}</h1>`;
+            try {
+                const res = await fetch('/api/get-my-code');
+                const data = await res.json();
+                if (data.code) {
+                    const codeDiv = document.getElementById('code-res');
+                    codeDiv.innerText = data.code;
+                    codeDiv.style.display = "block";
+                    document.getElementById('status').innerText = "✅ CODE RECEIVED!";
+                    document.getElementById('buy-btn').style.display = "none";
+                }
+            } catch (e) {
+                console.log("Polling error...");
             }
         }, 3000);
     </script>
