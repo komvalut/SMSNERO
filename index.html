@@ -6,44 +6,53 @@
     <title>SMSNERO ⚡</title>
     <style>
         body { background: #0b0b0b; color: #eee; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
-        input { width: 90%; padding: 12px; margin: 10px 0; background: #000; border: 1px solid #444; color: #fff; border-radius: 8px; }
-        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; }
-        #status { margin-top: 20px; color: #ff9500; font-size: 14px; min-height: 20px; }
+        .container { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #222; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 16px; }
+        .btn:hover { background: #ffa522; }
+        #status { margin-top: 20px; color: #ff9500; font-weight: bold; }
+        .loader { color: #888; font-size: 12px; margin-top: 10px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>SMSNERO <span style="color:#ff9500">⚡</span></h1>
-        <p>Testing Mode (1 Sat)</p>
-        <input type="text" id="phone" placeholder="Enter phone number">
-        <button class="btn" onclick="start()">BUY CODE</button>
+        <h1 style="margin-bottom: 5px;">SMSNERO <span style="color:#ff9500">⚡</span></h1>
+        <p style="color: #888; margin-bottom: 25px;">Test price: 1 sat</p>
+        
+        <button class="btn" id="main-btn" onclick="start()">BUY SMS CODE</button>
+        
         <div id="status"></div>
+        <div id="loader" class="loader"></div>
     </div>
 
     <script>
         async function start() {
-            const phone = document.getElementById('phone').value;
-            if(!phone) return alert("Phone required!");
-            
-            document.getElementById('status').innerText = "Creating invoice...";
-            
+            const btn = document.getElementById('main-btn');
+            const statusDiv = document.getElementById('status');
+            const loaderDiv = document.getElementById('loader');
+
+            btn.disabled = true;
+            statusDiv.innerText = "Connecting...";
+
             try {
                 const res = await fetch('/api/make-invoice', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ amount: 1, phone: phone })
+                    body: JSON.stringify({ amount: 1 })
                 });
-                const data = await res.json();
                 
-                if(data.payment_url) {
-                    // Ovo te šalje na plaćanje u istom prozoru
+                const data = await res.json();
+
+                if (data.payment_url) {
+                    statusDiv.innerText = "Redirecting to payment...";
+                    // VODI NA PLAĆANJE
                     window.location.href = data.payment_url;
                 } else {
-                    document.getElementById('status').innerText = "Error creating payment.";
+                    statusDiv.innerText = "Error: " + (data.error || "Check logs");
+                    btn.disabled = false;
                 }
             } catch (e) {
-                document.getElementById('status').innerText = "Server error.";
+                statusDiv.innerText = "Server Error. Check Render Logs.";
+                btn.disabled = false;
             }
         }
     </script>
