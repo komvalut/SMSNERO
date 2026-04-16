@@ -1,75 +1,71 @@
 const express = require('express');
-const path = require('path');
 const axios = require('axios');
+const path = require('path');
 const app = express();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Clean up the Token from Environment Variables
-const ALBY_TOKEN = process.env.ALBY_TOKEN ? process.env.ALBY_TOKEN.trim() : null;
+// --- CONFIGURATION ---
+const API_KEY = process.env.BTCPAY_API_KEY; // Tvoj novi API Key
+const STORE_ID = process.env.BTCPAY_STORE_ID; // Tvoj Store ID
+const BTCPAY_URL = "https://checkout.swissbitcoinpay.com"; // Ili tvoj BTCPay URL
 
-// Temporary database for incoming codes
 let smsDatabase = {}; 
 
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-// 📩 ENDPOINT FOR SMS FORWARDER APP
+// 📩 SMS RECEIVER (Ovo već provereno radi kod tebe!)
 app.post('/api/incoming-sms', (req, res) => {
-    const { from, message } = req.body; 
-    console.log(`NEW SMS RECEIVED -> From: ${from}, Content: ${message}`);
-    
-    // We store the message globally for the "last" request
-    smsDatabase["last"] = message; 
+    const { from, message } = req.body;
+    console.log(`📩 SMS RECEIVED: ${message}`);
+    smsDatabase["last"] = message;
     res.status(200).send("OK");
 });
 
-// ⚡ CREATE LIGHTNING INVOICE
+// ⚡ CREATE BTCPAY INVOICE
 app.post('/api/make-invoice', async (req, res) => {
     try {
-        const response = await axios.post('https://api.getalby.com/invoices', 
-            { amount: parseInt(req.body.amount), memo: req.body.memo }, 
-            { headers: { 'Authorization': `Bearer ${ALBY_TOKEN}`, 'Content-Type': 'application/json' } }
-        );
-        res.json(response.data);
-    } catch (e) { 
-        console.error("Alby Error:", e.response ? e.response.data : e.message);
-        res.status(500).json({ error: "Alby error" }); 
-    }
-});
-
-// 🔍 CHECK PAYMENT STATUS (Improved detection)
-app.get('/api/check-payment/:hash', async (req, res) => {
-    try {
-        const response = await axios.get(`https://api.getalby.com/invoices/${req.params.hash}`, {
-            headers: { 'Authorization': `Bearer ${ALBY_TOKEN}` }
+        const response = await axios.post(`${BTCPAY_URL}/api/v1/stores/${STORE_ID}/invoices`, {
+            amount: req.body.amount,
+            currency: "SATS",
+            checkout: { speedPolicy: "HighSpeed" }
+        }, {
+            headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'application/json' }
         });
         
-        // Check for any sign of successful payment
-        const isPaid = response.data.settled || response.data.state === 'SETTLED' || response.data.status === 'paid';
-        
-        console.log(`Payment Status for ${req.params.hash.substring(0,8)}: ${isPaid}`);
-        res.json({ settled: isPaid });
-    } catch (e) { 
-        res.json({ settled: false }); 
+        // Vraćamo checkout link ili payment request
+        res.json({ 
+            id: response.data.id, 
+            checkoutLink: response.data.checkoutLink 
+        });
+    } catch (e) {
+        console.error("BTCPay Error:", e.message);
+        res.status(500).json({ error: "Payment provider error" });
     }
 });
 
-// 🔑 DELIVER CODE TO CUSTOMER
-app.get('/api/get-my-code/:phone', (req, res) => {
-    const latestCode = smsDatabase["last"]; 
-    if (latestCode) {
-        res.json({ code: latestCode });
-        // Clear it after delivery so it's only used once
-        smsDatabase["last"] = null;
-    } else {
-        res.json({ code: null });
+// 🔍 CHECK PAYMENT
+app.get('/api/check-payment/:id', async (req, res) => {
+    try {
+        const response = await axios.get(`${BTCPAY_URL}/api/v1/stores/${STORE_ID}/invoices/${req.params.id}`, {
+            headers: { 'Authorization': `Bearer ${API_KEY}` }
+        });
+        
+        // Kod BTCPay-a status 'Settled' ili 'Processing' (za Lightning) znači uspeh
+        const status = response.data.status;
+        const isPaid = (status === 'Settled' || status === 'Processing');
+        
+        console.log(`Invoice ${req.params.id} status: ${status}`);
+        res.json({ settled: isPaid });
+    } catch (e) {
+        res.json({ settled: false });
     }
+});
+
+// 🔑 GET CODE
+app.get('/api/get-my-code/:phone', (req, res) => {
+    res.json({ code: smsDatabase["last"] || null });
+    if(smsDatabase["last"]) smsDatabase["last"] = null;
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-    console.log("🚀 SMSNERO Server is LIVE on port " + PORT);
-});
+app.listen(PORT, () => console.log(`🚀 BTCPay Edition running on port ${PORT}`));
