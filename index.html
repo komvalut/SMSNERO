@@ -1,23 +1,72 @@
-async function initiatePurchase(amount, phone) {
-    document.getElementById('payment-area').style.display = "block";
-    document.getElementById('loading-text').innerText = "Opening Swiss Bitcoin Pay...";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SMSNERO ⚡ Swiss Pay</title>
+    <style>
+        body { background: #0b0b0b; color: #eee; font-family: sans-serif; text-align: center; padding: 20px; }
+        .container { max-width: 400px; margin: auto; background: #151515; padding: 20px; border-radius: 15px; border: 1px solid #222; }
+        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        #payment-area { display: none; margin-top: 20px; border: 1px dashed #ff9500; padding: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SMSNERO <span style="color:#ff9500">⚡</span></h1>
+        <input type="text" id="phone_input" placeholder="Phone Number" style="width:80%; padding:10px; margin-bottom:10px;">
+        <button class="btn" onclick="initiatePurchase(100, document.getElementById('phone_input').value)">BUY CODE (100 sats)</button>
 
-    try {
-        const res = await fetch('/api/make-invoice', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ amount: amount, memo: "SMS for " + phone, phone: phone })
-        });
-        const data = await res.json();
-        
-        // AUTOMATSKI OTVARA SWISS PAY U NOVOM TABU
-        window.open(data.payment_url, '_blank');
-        
-        document.getElementById('loading-text').innerText = "Please complete the payment in the new tab. Waiting for confirmation...";
-        
-        // Počinje da prati uplatu koristeći ID fakture
-        monitorPayment(data.id, phone); 
-    } catch (e) {
-        document.getElementById('loading-text').innerText = "Error connecting to Swiss Bitcoin Pay.";
-    }
-}
+        <div id="payment-area">
+            <p id="loading-text">Waiting for payment...</p>
+        </div>
+    </div>
+
+    <script>
+        async function initiatePurchase(amount, phone) {
+            if(!phone) return alert("Enter phone!");
+            document.getElementById('payment-area').style.display = "block";
+            document.getElementById('loading-text').innerText = "Opening Swiss Bitcoin Pay...";
+
+            try {
+                const res = await fetch('/api/make-invoice', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ amount: amount, phone: phone })
+                });
+                const data = await res.json();
+                
+                // Otvaramo Swiss Pay u novom prozoru
+                window.open(data.payment_url, '_blank');
+                
+                document.getElementById('loading-text').innerText = "Paid? Waiting for confirmation...";
+                monitorPayment(data.id, phone);
+            } catch (e) {
+                document.getElementById('loading-text').innerText = "Error connecting to Swiss Pay.";
+            }
+        }
+
+        function monitorPayment(id, phone) {
+            const i = setInterval(async () => {
+                const res = await fetch('/api/check-payment/' + id);
+                const d = await res.json();
+                if(d.settled) {
+                    clearInterval(i);
+                    document.getElementById('loading-text').innerText = "✅ Paid! Waiting for SMS...";
+                    pollForSms(phone);
+                }
+            }, 3000);
+        }
+
+        function pollForSms(phone) {
+            const i = setInterval(async () => {
+                const res = await fetch('/api/get-my-code/' + phone);
+                const d = await res.json();
+                if(d.code) {
+                    clearInterval(i);
+                    document.getElementById('payment-area').innerHTML = `<h2>CODE: ${d.code}</h2>`;
+                }
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
