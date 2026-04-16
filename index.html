@@ -9,11 +9,11 @@
         .box { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; text-align: center; }
         .btn { background: #ff9500; color: black; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 20px; }
         #status { margin-top: 20px; color: #ff9500; font-size: 14px; min-height: 20px; }
-        .code-display { font-size: 32px; color: #ff9500; font-weight: bold; margin-top: 20px; border: 2px dashed #ff9500; padding: 10px; display: none; }
+        .code-display { font-size: 28px; color: #ff9500; font-weight: bold; margin-top: 20px; border: 2px dashed #ff9500; padding: 15px; display: none; background: #000; }
     </style>
 </head>
 <body>
-    <div class="box" id="main-box">
+    <div class="box">
         <h1>SMSNERO ⚡</h1>
         <p>Test Price: 1 sat</p>
         <button class="btn" id="buy-btn" onclick="initiateBuy()">BUY SMS CODE</button>
@@ -27,34 +27,35 @@
             statusDiv.innerText = "Connecting to Swiss Pay...";
             
             try {
+                // Pozivamo tvoj backend na Renderu
                 const res = await fetch('/api/make-invoice', { method: 'POST' });
                 const data = await res.json();
                 
                 if (data.payment_url) {
-                    statusDiv.innerText = "Redirecting to payment...";
+                    statusDiv.innerText = "Redirecting...";
                     window.location.href = data.payment_url;
                 } else {
-                    statusDiv.innerText = "Error: Could not create invoice.";
+                    statusDiv.innerText = "Error: " + (data.error || "Check API Key");
                 }
             } catch (e) {
                 statusDiv.innerText = "Server error. Try again.";
             }
         }
 
-        // Automatska provera da li je stigao SMS kod
+        // Svake 3 sekunde proverava da li je stigao SMS
         setInterval(async () => {
             try {
                 const res = await fetch('/api/get-my-code');
                 const data = await res.json();
                 if (data.code) {
                     const codeDiv = document.getElementById('code-res');
-                    codeDiv.innerText = data.code;
+                    codeDiv.innerText = "YOUR CODE: " + data.code;
                     codeDiv.style.display = "block";
-                    document.getElementById('status').innerText = "✅ CODE RECEIVED!";
+                    document.getElementById('status').innerText = "✅ SUCCESS!";
                     document.getElementById('buy-btn').style.display = "none";
                 }
             } catch (e) {
-                console.log("Polling error...");
+                console.log("Waiting for code...");
             }
         }, 3000);
     </script>
