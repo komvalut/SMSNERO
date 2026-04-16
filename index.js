@@ -8,54 +8,58 @@ app.use(express.static(path.join(__dirname)));
 
 const ALBY_TOKEN = process.env.ALBY_TOKEN ? process.env.ALBY_TOKEN.trim() : null;
 
-// Privremena baza za SMS poruke
 let smsDatabase = {}; 
 
-// FIX: Ova ruta osigurava da se otvori SAJT, a ne kod
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// RUTA ZA SMS FORWARDER (Tvoj telefon šalje ovde)
+// SMS FORWARDER RUTA
 app.post('/api/incoming-sms', (req, res) => {
     const { from, message } = req.body; 
-    console.log(`Stigao SMS od: ${from}, Sadržaj: ${message}`);
-    smsDatabase[from] = message;
+    console.log(`STIGAO SMS -> Od: ${from}, Poruka: ${message}`);
+    // Čuvamo poruku pod ključem "last", tako je najsigurnije za test
+    smsDatabase["last"] = message; 
     res.status(200).send("OK");
 });
 
-// PRAVLJENJE ALBY RAČUNA
+// KREIRANJE FAKTURE
 app.post('/api/make-invoice', async (req, res) => {
     try {
-        const { amount, memo } = req.body;
         const response = await axios.post('https://api.getalby.com/invoices', 
-            { amount: parseInt(amount), memo: memo }, 
-            { headers: { 'Authorization': `Bearer ${ALBY_TOKEN}` } }
+            { amount: parseInt(req.body.amount), memo: req.body.memo }, 
+            { headers: { 'Authorization': `Bearer ${ALBY_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         res.json(response.data);
-    } catch (e) { res.status(500).json({ error: "Alby error" }); }
+    } catch (e) { 
+        console.error("Alby Error:", e.response ? e.response.data : e.message);
+        res.status(500).json({ error: "Alby error" }); 
+    }
 });
 
-// PROVERA UPLATE
+// PROVERA UPLATE - POBOLJŠANA
 app.get('/api/check-payment/:hash', async (req, res) => {
     try {
         const response = await axios.get(`https://api.getalby.com/invoices/${req.params.hash}`, {
             headers: { 'Authorization': `Bearer ${ALBY_TOKEN}` }
         });
+        // Logujemo u konzolu da vidimo šta Alby kaže
+        console.log("Status uplate:", response.data.settled);
         res.json({ settled: response.data.settled });
-    } catch (e) { res.status(500).json({ error: "Check error" }); }
+    } catch (e) { res.status(500).json({ settled: false }); }
 });
 
-// SLANJE KODA KUPCU
-app.get('/api/get-my-code/:serviceName', (req, res) => {
-    const messages = Object.values(smsDatabase);
-    if (messages.length > 0) {
-        const lastMessage = messages[messages.length - 1];
-        res.json({ code: lastMessage });
+// ISPORUKA KODA
+app.get('/api/get-my-code/:phone', (req, res) => {
+    const kod = smsDatabase["last"]; 
+    if (kod) {
+        res.json({ code: kod });
+        // Brišemo kod nakon što ga kupac preuzme da ne bi ostao za sledećeg
+        smsDatabase["last"] = null;
     } else {
         res.json({ code: null });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Sistem spreman na portu " + PORT));
+app.listen(PORT, () => console.log("🚀 Server aktivan na portu " + PORT));
