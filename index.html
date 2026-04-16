@@ -1,60 +1,46 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMSNERO ⚡</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #0b0b0b; color: #eee; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { width: 100%; max-width: 350px; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #222; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 16px; }
-        .btn:hover { background: #ffa522; }
+        body { background: #0b0b0b; color: white; font-family: sans-serif; text-align: center; padding: 50px 20px; }
+        .box { max-width: 350px; margin: auto; background: #151515; padding: 30px; border-radius: 20px; border: 1px solid #333; }
+        .btn { background: #ff9500; color: black; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; }
         #status { margin-top: 20px; color: #ff9500; font-weight: bold; }
-        .loader { color: #888; font-size: 12px; margin-top: 10px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1 style="margin-bottom: 5px;">SMSNERO <span style="color:#ff9500">⚡</span></h1>
-        <p style="color: #888; margin-bottom: 25px;">Test price: 1 sat</p>
-        
-        <button class="btn" id="main-btn" onclick="start()">BUY SMS CODE</button>
-        
+    <div class="box">
+        <h1>SMSNERO ⚡</h1>
+        <p>Price: 1 sat</p>
+        <button class="btn" onclick="buy()">BUY SMS CODE</button>
         <div id="status"></div>
-        <div id="loader" class="loader"></div>
     </div>
 
     <script>
-        async function start() {
-            const btn = document.getElementById('main-btn');
-            const statusDiv = document.getElementById('status');
-            const loaderDiv = document.getElementById('loader');
+        let invoiceId = null;
 
-            btn.disabled = true;
-            statusDiv.innerText = "Connecting...";
-
+        async function buy() {
+            document.getElementById('status').innerText = "Creating invoice...";
             try {
-                const res = await fetch('/api/make-invoice', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ amount: 1 })
-                });
-                
+                const res = await fetch('/api/make-invoice', { method: 'POST' });
                 const data = await res.json();
-
-                if (data.payment_url) {
-                    statusDiv.innerText = "Redirecting to payment...";
-                    // VODI NA PLAĆANJE
-                    window.location.href = data.payment_url;
-                } else {
-                    statusDiv.innerText = "Error: " + (data.error || "Check logs");
-                    btn.disabled = false;
+                if(data.payment_url) {
+                    invoiceId = data.id;
+                    window.location.href = data.payment_url; // Šalje te na plaćanje
                 }
-            } catch (e) {
-                statusDiv.innerText = "Server Error. Check Render Logs.";
-                btn.disabled = false;
-            }
+            } catch (e) { document.getElementById('status').innerText = "Error!"; }
         }
+
+        // Proverava kod čim se vratiš sa plaćanja
+        setInterval(async () => {
+            const res = await fetch('/api/get-my-code');
+            const data = await res.json();
+            if(data.code) {
+                document.querySelector('.box').innerHTML = `<h1>YOUR CODE:</h1><h1 style="color:#ff9500">${data.code}</h1>`;
+            }
+        }, 3000);
     </script>
 </body>
 </html>
