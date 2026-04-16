@@ -6,28 +6,28 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Uzima ključ iz Render Environment Variables
+// Uzima kljuc iz Render Environment Variables
 const API_KEY = process.env.SWISS_API_KEY; 
 let lastSms = null; 
 
-// Prikazuje tvoj sajt
+// Glavna stranica
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// PRIMANJE SMS-a (Ovo šalje tvoja aplikacija sa telefona)
+// Prijem SMS-a (Forwarder aplikacija sa telefona gadja ovo)
 app.post('/api/incoming-sms', (req, res) => {
-    console.log("📩 STIGAO SMS:", req.body.message);
+    console.log("📩 SMS PRIMLJEN:", req.body.message);
     lastSms = req.body.message;
     res.send("OK");
 });
 
-// PRAVLJENJE RAČUNA (Poziva se kad klikneš na dugme)
+// Pravljenje racuna na Swiss Bitcoin Pay-u
 app.post('/api/make-invoice', async (req, res) => {
-    console.log("🚀 Zahtev za plaćanje primljen...");
+    console.log("🚀 Zahtev za racun pokrenut...");
     try {
         const response = await axios.post('https://api.swissbitcoinpay.com/checkout', {
-            amount: 1, // Test cena: 1 sat
+            amount: 1, // Cena 1 sat za test
             unit: "sats",
             description: "SMS Service Code"
         }, {
@@ -37,23 +37,18 @@ app.post('/api/make-invoice', async (req, res) => {
             }
         });
         
-        console.log("✅ Swiss račun napravljen:", response.data.id);
+        console.log("✅ Racun uspesno napravljen!");
         res.json({ id: response.data.id, payment_url: response.data.payment_url });
     } catch (e) {
-        console.log("❌ GRESKA SA SWISS PAY-OM:", e.response ? e.response.data : e.message);
-        res.status(500).json({ error: "API Error" });
+        console.log("❌ GRESKA SA SWISS PAY:", e.message);
+        res.status(500).json({ error: e.message });
     }
 });
 
-// SLANJE KODA NA EKRAN KUPCA
+// Provera da li je stigao SMS kod
 app.get('/api/get-my-code', (req, res) => {
-    if (lastSms) {
-        res.json({ code: lastSms });
-        // Opciono: lastSms = null; // Otkomentariši ako želiš da se kod vidi samo jednom
-    } else {
-        res.json({ code: null });
-    }
+    res.json({ code: lastSms });
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Server je online na portu ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server online na portu ${PORT}`));
