@@ -6,49 +6,48 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Uzima kljuc iz Render Environment Variables
+// API ključ iz Render podešavanja
 const API_KEY = process.env.SWISS_API_KEY; 
 let lastSms = null; 
 
-// Glavna stranica
+// Prikaz sajta
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Prijem SMS-a (Forwarder aplikacija sa telefona gadja ovo)
+// Prijem SMS-a sa telefona
 app.post('/api/incoming-sms', (req, res) => {
-    console.log("📩 SMS PRIMLJEN:", req.body.message);
+    console.log("📩 SMS STIGAO:", req.body.message);
     lastSms = req.body.message;
     res.send("OK");
 });
 
-// Pravljenje racuna na Swiss Bitcoin Pay-u
+// Pravljenje računa na Swiss Bitcoin Pay (1 sat)
 app.post('/api/make-invoice', async (req, res) => {
-    console.log("🚀 Zahtev za racun pokrenut...");
+    console.log("🚀 Zahtev za plaćanje...");
     try {
         const response = await axios.post('https://api.swissbitcoinpay.com/checkout', {
-            amount: 1, // Cena 1 sat za test
+            amount: 1,
             unit: "sats",
-            description: "SMS Service Code"
+            description: "SMS Service"
         }, {
             headers: { 
                 'api-key': API_KEY, 
                 'Content-Type': 'application/json' 
             }
         });
-        
-        console.log("✅ Racun uspesno napravljen!");
+        console.log("✅ Račun napravljen!");
         res.json({ id: response.data.id, payment_url: response.data.payment_url });
     } catch (e) {
-        console.log("❌ GRESKA SA SWISS PAY:", e.message);
-        res.status(500).json({ error: e.message });
+        console.error("❌ Greška:", e.message);
+        res.status(500).json({ error: "Swiss Pay Error" });
     }
 });
 
-// Provera da li je stigao SMS kod
+// Slanje koda kupcu
 app.get('/api/get-my-code', (req, res) => {
     res.json({ code: lastSms });
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Server online na portu ${PORT}`));
+app.listen(PORT, () => console.log("🚀 Server je online!"));
