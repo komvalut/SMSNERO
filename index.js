@@ -6,132 +6,113 @@ app.use(express.json());
 const API_KEY = process.env.SWISS_API_KEY;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
-// Ovde se čuvaju brojevi koje ubaciš
 let bazaBrojeva = []; 
 let zadnjiKod = "Čekam uplatu...";
 let statusUplate = false;
 
-// --- GLAVNI SAJT (Ono što kupci vide) ---
 app.get('/', (req, res) => {
-    let stavke = bazaBrojeva.length > 0 ? bazaBrojeva.map(b => `
-        <div style="background:#1a1a1a; margin:12px 0; padding:18px; border-radius:18px; display:flex; justify-content:space-between; align-items:center; border:1px solid #2a2a2a;">
-            <span style="font-size:15px; letter-spacing:1px; color:#eee;">RS ${b.broj}</span>
-            <button onclick="buy(${b.cena})" style="background:none; border:1px solid #ff9500; color:#ff9500; padding:8px 16px; border-radius:10px; cursor:pointer; font-weight:bold;">${b.cena} sats</button>
+    let stavke = bazaBrojeva.map(b => `
+        <div style="background:#1a1a1a; margin:10px 0; padding:18px; border-radius:15px; display:flex; justify-content:space-between; align-items:center; border:1px solid #2a2a2a;">
+            <span style="font-size:15px; letter-spacing:1px; color:#eee; font-weight:bold;">RS ${b.broj}</span>
+            <button onclick="buy(${b.cena})" style="background:none; border:1px solid #ff9500; color:#ff9500; padding:8px 16px; border-radius:10px; cursor:pointer; font-weight:bold; transition: 0.3s;">${b.cena} sats</button>
         </div>
-    `).join('') : '<p style="color:#666;">Trenutno nema dostupnih brojeva.</p>';
+    `).join('');
 
     res.send(`
 <!DOCTYPE html>
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
-        body { background: #0b0b0b; color: white; font-family: sans-serif; text-align: center; margin: 0; padding-top: 40px; }
-        .node { color: #0f0; font-size: 13px; margin-bottom: 15px; }
+        body { background: #0b0b0b; color: white; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+        .node { color: #0f0; font-size: 13px; margin-bottom: 15px; display: flex; align-items: center; justify-content: center; gap: 5px; }
+        .dot { height: 8px; width: 8px; background-color: #0f0; border-radius: 50%; display: inline-block; }
         .nav { display: flex; justify-content: center; gap: 8px; margin-bottom: 25px; }
-        .nav-btn { background: #222; border: none; color: #666; padding: 12px 20px; border-radius: 12px; font-weight: bold; font-size: 12px; }
-        .active { background: #333; color: #ff9500; border: 1px solid #444; }
-        .container { background: #151515; max-width: 380px; margin: auto; padding: 25px; border-radius: 25px; border: 1px solid #222; }
+        .nav-btn { background: #1a1a1a; border: none; color: #666; padding: 12px 20px; border-radius: 12px; font-weight: bold; font-size: 12px; }
+        .active { background: #222; color: #ff9500; border: 1px solid #333; }
+        .card { background: #151515; max-width: 400px; margin: auto; padding: 25px; border-radius: 25px; border: 1px solid #222; }
+        input { background: #000; border: 1px solid #333; color: #fff; padding: 12px; width: 85%; border-radius: 10px; margin-bottom: 10px; outline: none; }
+        .btn-post { background: #ff9500; color: black; border: none; width: 92%; padding: 15px; border-radius: 12px; font-weight: bold; cursor: pointer; margin-bottom: 20px; }
+        .invoice-box { background: #000; border: 2px dashed #ff9500; padding: 20px; margin-top: 20px; border-radius: 20px; }
+        #qrcode { background: white; padding: 15px; display: inline-block; margin: 15px 0; border-radius: 15px; }
+        #qrcode img { margin: 0 auto; }
+        h1 { font-style: italic; font-size: 32px; margin-bottom: 5px; letter-spacing: -1px; }
     </style>
 </head>
 <body>
     <h1>SMSNERO ⚡</h1>
-    <div class="node">● Node: Online</div>
+    <div class="node"><span class="dot"></span> Node: Online</div>
+
     <div class="nav">
         <button class="nav-btn">RECEIVE</button>
         <button class="nav-btn active">P2P MARKET</button>
         <button class="nav-btn">RENT</button>
     </div>
-    <div class="container">
-        <h2 style="margin:0; font-size:20px;">P2P SMS Market</h2>
-        <p style="color:#666; font-size:14px; margin-bottom:20px;">Izaberite broj i kupite OTP kod</p>
-        ${stavke}
-        <div id="status" style="margin-top:15px; color:#ff9500; font-weight:bold;"></div>
+
+    <div class="card">
+        <h3 style="margin-top:0; color:#888; font-size:14px;">Admin: Post to Market</h3>
+        <input id="num" placeholder="+381 64 XXX XXXX">
+        <input id="prc" type="number" placeholder="Cena u sats">
+        <button class="btn-post" onclick="postToMarket()">POST TO MARKET</button>
+
+        <div id="market-list">${stavke}</div>
+
+        <div id="payment-area" style="display:none;">
+            <div class="invoice-box">
+                <h3 id="inv-status" style="color:#ff9500; margin:0;">Generating QR...</h3>
+                <div id="qrcode"></div>
+                <p style="font-size:11px; color:#555; word-break:break-all;" id="inv-text"></p>
+                <p style="margin-bottom:0; font-weight:bold;">Waiting for payment...</p>
+            </div>
+        </div>
     </div>
+
+    <div style="margin-top:30px; font-size:12px; color:#333;">
+        Support | My History
+    </div>
+
     <script>
-        let invId = null;
-        async function buy(cena) {
-            document.getElementById('status').innerText = "Otvaram račun...";
-            const r = await fetch('/api/create-inv', {
-                method:'POST', 
-                headers:{'Content-Type':'application/json'}, 
-                body:JSON.stringify({amount: cena})
-            });
-            const d = await r.json();
-            if(d.url) { invId = d.id; window.location.href = d.url; }
+        async function postToMarket() {
+            const b = document.getElementById('num').value;
+            const c = document.getElementById('prc').value;
+            if(!b || !c) return;
+            await fetch('/admin/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({broj:b, cena:c})});
+            location.reload();
         }
+
+        let invId = null;
+        async function buy(amount) {
+            document.getElementById('payment-area').scrollIntoView({behavior: 'smooth'});
+            document.getElementById('payment-area').style.display = 'block';
+            document.getElementById('qrcode').innerHTML = "";
+            
+            const r = await fetch('/api/create-inv', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({amount: amount})});
+            const d = await r.json();
+            
+            if(d.pr) { 
+                document.getElementById('inv-status').innerText = "Scan to Pay " + amount + " sats";
+                new QRCode(document.getElementById("qrcode"), { text: d.pr, width: 180, height: 180 });
+                document.getElementById('inv-text').innerText = d.pr;
+                invId = d.id;
+            }
+        }
+
         setInterval(async () => {
             if(!invId) return;
             const r = await fetch('/api/check-status');
             const d = await r.json();
             if(d.paid) {
-                document.body.innerHTML = "<div style='padding-top:150px;'><h1>KOD:</h1><div style='font-size:60px; color:#ff9500; border:4px dashed #ff9500; padding:30px; display:inline-block;'>"+d.code+"</div></div>";
+                document.body.innerHTML = "<div style='padding-top:150px; background:#0b0b0b; height:100vh;'><h1>KOD:</h1><div style='font-size:60px; color:#ff9500; border:4px dashed #ff9500; padding:30px; display:inline-block; margin-top:20px;'>"+d.code+"</div><br><button onclick='location.reload()' style='margin-top:40px; background:#222; color:white; border:none; padding:15px 30px; border-radius:15px; cursor:pointer;'>Back to Market</button></div>";
             }
-        }, 3000);
+        }, 2000);
     </script>
 </body>
 </html>`);
 });
 
-// --- ADMIN PANEL (Direktno ubacivanje na /admin-nero) ---
-app.get('/admin-nero', (req, res) => {
-    let trenutni = bazaBrojeva.map(b => `
-        <div style="border-bottom:1px solid #333; padding:10px; display:flex; justify-content:space-between;">
-            <span>${b.broj} - <b>${b.cena} sats</b></span>
-            <button onclick="obrisi('${b.id}')" style="background:red; color:white; border:none; cursor:pointer;">X</button>
-        </div>
-    `).join('');
-
-    res.send(`
-        <body style="background:#000; color:#0f0; padding:20px; font-family:monospace;">
-            <h1>⚡ ADMIN PANEL</h1>
-            <div style="background:#111; padding:20px; border:2px solid #0f0; border-radius:10px;">
-                <h3>DODAJ BROJ I CENU:</h3>
-                <input id="n" placeholder="Broj telefona (npr +381...)" style="padding:10px; width:200px;">
-                <input id="c" type="number" placeholder="Cena u sats" style="padding:10px; width:100px;">
-                <button onclick="dodaj()" style="padding:10px; background:#0f0; color:#000; font-weight:bold; cursor:pointer;">UBCI NA SAJT</button>
-            </div>
-            <br>
-            <div style="background:#111; padding:20px; border:1px solid #444;">
-                <h3>BROJEVI KOJI SU ONLINE:</h3>
-                ${trenutni}
-            </div>
-            <br>
-            <div style="background:#111; padding:20px; border:1px solid #ff9500;">
-                <h3>RUČNI SMS KOD:</h3>
-                <input id="k" placeholder="Unesi kod ovde" style="padding:10px;">
-                <button onclick="pusti()" style="padding:10px; background:#ff9500; color:#000; font-weight:bold;">PUSTI KUPCU</button>
-            </div>
-            <script>
-                async function dodaj() {
-                    const b = document.getElementById('n').value;
-                    const c = document.getElementById('c').value;
-                    await fetch('/admin/add-number', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({broj:b, cena:c})});
-                    location.reload();
-                }
-                async function obrisi(id) {
-                    await fetch('/admin/delete-number', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})});
-                    location.reload();
-                }
-                async function pusti() {
-                    const kod = document.getElementById('k').value;
-                    await fetch('/api/incoming-sms', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:kod})});
-                    alert('Kod je postavljen i čeka uplatu!');
-                }
-            </script>
-        </body>
-    `);
-});
-
-// --- LOGIKA I RUTE ---
-
-app.post('/admin/add-number', (req, res) => {
+app.post('/admin/add', (req, res) => {
     bazaBrojeva.push({ id: Date.now().toString(), broj: req.body.broj, cena: parseInt(req.body.cena) });
-    res.sendStatus(200);
-});
-
-app.post('/admin/delete-number', (req, res) => {
-    bazaBrojeva = bazaBrojeva.filter(b => b.id !== req.body.id);
     res.sendStatus(200);
 });
 
@@ -141,9 +122,7 @@ app.post('/api/incoming-sms', (req, res) => {
 });
 
 app.post('/api/webhook', (req, res) => {
-    if (req.body.status === 'confirmed' || req.body.status === 'paid') {
-        statusUplate = true;
-    }
+    if (req.body.status === 'confirmed' || req.body.status === 'paid') statusUplate = true;
     res.send("OK");
 });
 
@@ -158,7 +137,7 @@ app.post('/api/create-inv', async (req, res) => {
             webhook: BASE_URL + '/api/webhook'
         }, { headers: { 'api-key': API_KEY } });
         statusUplate = false;
-        res.json({ url: r.data.checkoutUrl, id: r.data.id });
+        res.json({ pr: r.data.paymentRequest, id: r.data.id });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
