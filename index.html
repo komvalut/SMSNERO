@@ -1,123 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMSNERO ⚡ Lightning SMS</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-    <style>
-        body { background: #0b0b0b; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; padding: 20px; }
-        .container { width: 100%; max-width: 420px; background: #151515; padding: 25px; border-radius: 20px; border: 1px solid #222; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        .orange { color: #ff9500; }
-        input { width: 90%; padding: 12px; margin: 10px 0; background: #000; border: 1px solid #333; color: #fff; border-radius: 8px; outline: none; }
-        .btn { background: #ff9500; color: #000; border: none; padding: 15px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        .btn:hover { background: #ffa522; transform: translateY(-2px); }
-        #payment-area { display: none; margin-top: 25px; padding: 20px; border: 1px dashed #ff9500; border-radius: 15px; background: #0a0a0a; }
-        #qrcode { background: white; padding: 15px; display: inline-block; margin: 20px 0; border-radius: 10px; }
-        .status-msg { color: #888; font-size: 13px; margin-top: 10px; }
-        .market-item { display: flex; justify-content: space-between; align-items: center; background: #222; padding: 12px; margin-top: 8px; border-radius: 10px; }
-        .buy-btn { background: #ff9500; border: none; padding: 8px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>SMSNERO <span class="orange">⚡</span></h1>
+async function initiatePurchase(amount, phone) {
+    document.getElementById('payment-area').style.display = "block";
+    document.getElementById('loading-text').innerText = "Opening Swiss Bitcoin Pay...";
+
+    try {
+        const res = await fetch('/api/make-invoice', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ amount: amount, memo: "SMS for " + phone, phone: phone })
+        });
+        const data = await res.json();
         
-        <div style="border-bottom: 1px solid #222; margin-bottom: 25px; padding-bottom: 20px;">
-            <p style="font-size: 14px; margin-bottom: 5px;">Admin: Add New Number</p>
-            <input type="text" id="phone" placeholder="Phone (e.g. +46792014312)">
-            <input type="number" id="price" placeholder="Price in Sats">
-            <button class="btn" onclick="addToMarket()">POST TO MARKET</button>
-        </div>
-
-        <div id="market-list"></div>
-
-        <div id="payment-area">
-            <h3 id="headline" class="orange">SCAN TO PAY:</h3>
-            <div id="qrcode"></div>
-            <p id="loading-text" class="status-msg">Generating Invoice...</p>
-            <textarea id="invoice-text" readonly style="width:100%; height:40px; background:#111; color:#ff9500; border:none; font-size:10px; border-radius:5px; padding:5px;"></textarea>
-        </div>
-    </div>
-
-    <script>
-        function addToMarket() {
-            const phone = document.getElementById('phone').value;
-            const price = document.getElementById('price').value;
-            if(!phone || !price) return;
-
-            const div = document.createElement('div');
-            div.className = "market-item";
-            div.innerHTML = `
-                <span>🇸🇪 ${phone}</span>
-                <button class="buy-btn" onclick="initiatePurchase(${price}, '${phone}')">${price} sats</button>
-            `;
-            document.getElementById('market-list').appendChild(div);
-        }
-
-        async function initiatePurchase(amount, phone) {
-            document.getElementById('payment-area').style.display = "block";
-            document.getElementById('qrcode').innerHTML = ""; 
-            document.getElementById('loading-text').innerText = "Creating Lightning Invoice...";
-
-            try {
-                const res = await fetch('/api/make-invoice', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ amount: amount, memo: "SMS Code for " + phone })
-                });
-                const data = await res.json();
-                
-                // Show Invoice Text
-                document.getElementById('invoice-text').value = data.payment_request;
-
-                // Generate Clean QR Code
-                new QRCode(document.getElementById("qrcode"), {
-                    text: data.payment_request.toUpperCase(),
-                    width: 240,
-                    height: 240,
-                    correctLevel : QRCode.CorrectLevel.L
-                });
-
-                document.getElementById('loading-text').innerText = "Waiting for payment...";
-                monitorPayment(data.payment_hash, phone);
-            } catch (e) {
-                document.getElementById('loading-text').innerText = "Error: Could not connect to Alby.";
-            }
-        }
-
-        function monitorPayment(hash, phone) {
-            const checkInterval = setInterval(async () => {
-                const res = await fetch('/api/check-payment/' + hash);
-                const data = await res.json();
-                
-                if(data.settled === true) {
-                    clearInterval(checkInterval);
-                    document.getElementById('qrcode').style.display = "none";
-                    document.getElementById('invoice-text').style.display = "none";
-                    document.getElementById('headline').innerText = "✅ PAID SUCCESSFULLY";
-                    document.getElementById('loading-text').innerText = "Waiting for SMS code to arrive...";
-                    pollForSms(phone);
-                }
-            }, 3000);
-        }
-
-        function pollForSms(phone) {
-            const smsInterval = setInterval(async () => {
-                const res = await fetch('/api/get-my-code/' + phone);
-                const data = await res.json();
-                if(data.code) {
-                    clearInterval(smsInterval);
-                    document.getElementById('payment-area').innerHTML = `
-                        <div style="background:#000; border:2px solid #00ff00; padding:25px; border-radius:15px; box-shadow: 0 0 20px rgba(0,255,0,0.2);">
-                            <h2 style="color:#00ff00; margin:0;">YOUR CODE ⚡</h2>
-                            <p style="font-size:28px; font-weight:bold; color:#fff; margin:20px 0; letter-spacing: 2px;">${data.code}</p>
-                            <p style="font-size:12px; color:#888;">Order complete! Thank you.</p>
-                        </div>
-                    `;
-                }
-            }, 2000);
-        }
-    </script>
-</body>
-</html>
+        // AUTOMATSKI OTVARA SWISS PAY U NOVOM TABU
+        window.open(data.payment_url, '_blank');
+        
+        document.getElementById('loading-text').innerText = "Please complete the payment in the new tab. Waiting for confirmation...";
+        
+        // Počinje da prati uplatu koristeći ID fakture
+        monitorPayment(data.id, phone); 
+    } catch (e) {
+        document.getElementById('loading-text').innerText = "Error connecting to Swiss Bitcoin Pay.";
+    }
+}
