@@ -11,34 +11,30 @@ const PORT = process.env.PORT || 10000;
 
 app.use(express.json());
 
-// RUTA ZA KREIRANJE FAKTURE
+// 1. KREIRANJE BITCOIN FAKTURE
 app.post('/create-invoice', async (req, res) => {
-    const { amountSats } = req.body;
-    
-    // Čitamo direktno sa Rendera
-    const apiKey = process.env.SWISS_API_KEY;
-    const apiSecret = process.env.SWISS_API_SECRET;
+    const key = process.env.SWISS_API_KEY;
+    const secret = process.env.SWISS_API_SECRET;
 
-    if (!apiKey || !apiSecret) {
-        return res.status(500).json({ error: 'API ključevi nisu podešeni na Renderu!' });
+    if (!key || !secret) {
+        return res.status(500).json({ error: 'Fale API ključevi na Renderu!' });
     }
 
     try {
         const response = await axios.post('https://swissbitcoinpay.com', {
-            apiKey: apiKey,
-            apiSecret: apiSecret,
-            amount: parseInt(amountSats),
+            apiKey: key,
+            apiSecret: secret,
+            amount: 1,
             unit: 'sat',
-            description: 'SMSNero Rental'
+            description: 'SMSNero Aktivacija'
         });
         res.json({ checkoutUrl: response.data.checkoutUrl });
     } catch (error) {
-        console.error('SBP API Greška:', error.response?.data || error.message);
-        res.status(500).json({ error: 'Komunikacija sa SwissBitcoinPay neuspešna' });
+        res.status(500).json({ error: 'SwissBitcoinPay odbija: ' + (error.response?.data?.message || 'Nepoznata greška') });
     }
 });
 
-// SMS RECEIVER
+// 2. PRIJEM SMS PORUKE
 app.post('/sms', (req, res) => {
     const { number, text } = req.body;
     const otp = text.match(/\b\d{4,6}\b/) ? text.match(/\b\d{4,6}\b/)[0] : null;
@@ -51,51 +47,65 @@ app.post('/sms', (req, res) => {
     res.sendStatus(200);
 });
 
-// FRONTEND
+// 3. KOMPLETAN INTERFEJS
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SMSNero | Test</title>
+    <title>SMSNero MVP</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #000; color: #fff; font-family: monospace; text-align: center; padding: 20px; }
-        .btn { background: #f2a900; color: #000; border: none; padding: 20px; font-weight: bold; width: 100%; border-radius: 10px; cursor: pointer; }
-        .status { border: 1px solid #0f0; color: #0f0; padding: 20px; margin-top: 20px; display: none; }
+        .card { border: 1px solid #f2a900; padding: 20px; border-radius: 12px; max-width: 400px; margin: 20px auto; background: #111; }
+        .btn { background: #f2a900; color: #000; border: none; padding: 20px; font-weight: bold; width: 100%; border-radius: 8px; cursor: pointer; font-size: 1.1em; }
+        .otp-window { display: none; border: 2px solid #0f0; padding: 20px; color: #0f0; margin-top: 20px; background: #001a00; border-radius: 10px; }
+        #otp-val { font-size: 3em; display: block; margin: 15px 0; letter-spacing: 5px; color: #fff; }
+        .loader { color: #f2a900; font-size: 0.8em; margin-top: 10px; }
     </style>
 </head>
 <body>
-    <h1>SMSNERO</h1>
-    <div style="border: 1px solid #333; padding: 20px; border-radius: 10px;">
-        <p>Cena: 1 sat</p>
+    <h1>SMS<span style="color:#f2a900">NERO</span></h1>
+    
+    <div class="card">
+        <p>Aktivacija broja</p>
+        <h2 id="active-num">+46 700 44 55 66</h2>
+        <p style="color: #f2a900;">Cena: 1 sat</p>
         <button class="btn" onclick="pay()">PLATITE I AKTIVIRAJTE</button>
+        <p class="loader">Klik otvara SwissBitcoinPay (QR + Copy)</p>
     </div>
-    <div id="status" class="status">SISTEM AKTIVAN... ČEKAM SMS</div>
-    <div id="otp-display" style="font-size: 3em; color: #fff; margin-top: 20px;"></div>
+
+    <div id="otp-window" class="otp-window">
+        SISTEM AKTIVAN - ČEKAM SMS...
+        <span id="otp-val">------</span>
+        <div id="sms-text" style="font-size: 0.8em; opacity: 0.8;"></div>
+    </div>
 
     <script>
         const ws = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host);
         
         async function pay() {
-            const res = await fetch('/create-invoice', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ amountSats: 1 })
-            });
-            const data = await res.json();
-            if(data.checkoutUrl) {
-                window.open(data.checkoutUrl, '_blank');
-                document.getElementById('status').style.display = 'block';
-            } else {
-                alert('Greška: ' + (data.error || 'Nepoznata greška'));
+            try {
+                const res = await fetch('/create-invoice', { method: 'POST' });
+                const data = await res.json();
+                
+                if(data.checkoutUrl) {
+                    window.open(data.checkoutUrl, '_blank');
+                    document.getElementById('otp-window').style.display = 'block';
+                } else {
+                    alert('Greška: ' + data.error);
+                }
+            } catch (e) {
+                alert('Server ne odgovara.');
             }
         }
 
         ws.onmessage = (e) => {
             const msg = JSON.parse(e.data);
             if(msg.type === 'SMS') {
-                document.getElementById('otp-display').innerText = msg.data.otp || 'Kod primljen';
+                document.getElementById('otp-val').innerText = msg.data.otp || 'KOD';
+                document.getElementById('sms-text').innerText = msg.data.text;
+                document.getElementById('otp-window').style.borderColor = '#fff';
             }
         };
     </script>
@@ -104,4 +114,4 @@ app.get('/', (req, res) => {
     `);
 });
 
-server.listen(PORT, () => console.log('Server is running...'));
+server.listen(PORT, () => console.log('SMSNero Online'));
