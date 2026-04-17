@@ -41,9 +41,7 @@ function signToken(user) {
 
 function verifyToken(token) {
   const parts = String(token || "").split(".");
-  if (parts.length !== 3) {
-    throw new Error("Invalid token");
-  }
+  if (parts.length !== 3) throw new Error("Invalid token");
 
   const expected = crypto
     .createHmac("sha256", JWT_SECRET)
@@ -67,14 +65,12 @@ function auth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : header;
 
-  if (!token) {
-    return res.status(401).json({ error: "Missing token" });
-  }
+  if (!token) return res.status(401).json({ error: "Missing token" });
 
   try {
     req.user = verifyToken(token);
     return next();
-  } catch (error) {
+  } catch {
     return res.status(403).json({ error: "Invalid token" });
   }
 }
@@ -98,9 +94,7 @@ function rateLimit(req, res, next) {
 }
 
 function signPayload(payload) {
-  if (!SWISS_SECRET_KEY) {
-    throw new Error("SWISS_SECRET_KEY is missing");
-  }
+  if (!SWISS_SECRET_KEY) throw new Error("SWISS_SECRET_KEY is missing");
 
   return crypto
     .createHmac("sha256", SWISS_SECRET_KEY)
@@ -145,8 +139,10 @@ function pageHtml() {
 <body>
   <main>
     <h1>SMSNero</h1>
-    <p class="muted">Temporary SMS numbers, QR payment and live OTP inbox.</p>
+    <p class="muted">Temporary SMS numbers, Bitcoin Lightning QR payment and live OTP inbox.</p>
+
     <button onclick="register()">Register demo user</button>
+
     <div id="status"></div>
     <div id="qr"></div>
     <div id="app" class="box">Register to load numbers.</div>
@@ -158,7 +154,13 @@ function pageHtml() {
 
     function escapeHtml(value) {
       return String(value).replace(/[&<>'"]/g, function (char) {
-        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\\"": "&quot;" }[char];
+        return {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          "'": "&#39;",
+          '"': "&quot;"
+        }[char];
       });
     }
 
@@ -168,7 +170,9 @@ function pageHtml() {
     }
 
     function authHeaders(extra) {
-      return Object.assign({}, extra || {}, { Authorization: "Bearer " + token });
+      return Object.assign({}, extra || {}, {
+        Authorization: "Bearer " + token
+      });
     }
 
     async function register() {
@@ -189,7 +193,9 @@ function pageHtml() {
     async function load() {
       if (!token) return;
 
-      const response = await fetch("/numbers", { headers: authHeaders() });
+      const response = await fetch("/numbers", {
+        headers: authHeaders()
+      });
 
       if (!response.ok) {
         setStatus("Please register again.", true);
@@ -197,17 +203,18 @@ function pageHtml() {
       }
 
       const data = await response.json();
+
       let html = "";
       html += "<div class='box'>";
       html += "<h3>Add Number</h3>";
       html += "<input id='num' placeholder='e.g. +46700000001'>";
-      html += "<input id='price' type='number' placeholder='price CHF'>";
+      html += "<input id='price' type='number' min='1' step='1' placeholder='price in sats'>";
       html += "<button onclick='addNumber()'>Add</button>";
       html += "</div>";
 
       data.forEach(function (item) {
         html += "<div class='box'>";
-        html += escapeHtml(item.number) + " - " + escapeHtml(item.price) + " CHF ";
+        html += escapeHtml(item.number) + " - " + escapeHtml(item.price) + " sats ";
         html += "<button onclick='pay(" + Number(item.price) + "," + Number(item.id) + ")'>Buy</button>";
         html += "</div>";
       });
@@ -225,7 +232,9 @@ function pageHtml() {
         body: JSON.stringify({ number: number, price: price })
       });
 
-      const data = await response.json().catch(function () { return { error: "Error" }; });
+      const data = await response.json().catch(function () {
+        return { error: "Error" };
+      });
 
       if (!response.ok) {
         setStatus(data.error || "Could not add number.", true);
@@ -243,7 +252,9 @@ function pageHtml() {
         body: JSON.stringify({ amount: amount, numberId: id })
       });
 
-      const invoice = await response.json().catch(function () { return { error: "Payment error" }; });
+      const invoice = await response.json().catch(function () {
+        return { error: "Payment error" };
+      });
 
       if (!response.ok) {
         setStatus(invoice.error || "Payment error.", true);
@@ -264,8 +275,11 @@ function pageHtml() {
     ws.onmessage = function (event) {
       const message = JSON.parse(event.data);
       document.getElementById("otp").innerHTML +=
-        "<div>" + escapeHtml(message.number) + ": " + escapeHtml(message.text) +
-        " (" + escapeHtml(message.otp || "") + ")</div>";
+        "<div>" +
+        escapeHtml(message.number) + ": " +
+        escapeHtml(message.text) +
+        " (" + escapeHtml(message.otp || "") + ")" +
+        "</div>";
     };
 
     if (token) load();
@@ -289,9 +303,17 @@ app.get("/", function (req, res) {
 });
 
 app.post("/register", function (req, res) {
-  const user = { id: Date.now(), username: "user" + Date.now() };
+  const user = {
+    id: Date.now(),
+    username: "user" + Date.now()
+  };
+
   users.push(user);
-  res.json({ token: signToken(user), user: user });
+
+  res.json({
+    token: signToken(user),
+    user: user
+  });
 });
 
 app.get("/numbers", auth, function (req, res) {
@@ -303,14 +325,24 @@ app.post("/marketplace/add", auth, function (req, res) {
   const price = Number(req.body.price);
 
   if (!number || !/^\+[1-9]\d{7,14}$/.test(number)) {
-    return res.status(400).json({ error: "Use international phone format, for example +46700000001" });
+    return res.status(400).json({
+      error: "Use international phone format, for example +46700000001"
+    });
   }
 
-  if (!Number.isFinite(price) || price <= 0) {
-    return res.status(400).json({ error: "Price must be a positive number" });
+  if (!Number.isInteger(price) || price <= 0) {
+    return res.status(400).json({
+      error: "Price must be a positive whole number of satoshis"
+    });
   }
 
-  const item = { id: Date.now(), number: number, price: price, owner: req.user.id };
+  const item = {
+    id: Date.now(),
+    number: number,
+    price: price,
+    owner: req.user.id
+  };
+
   numbers.push(item);
   return res.json(item);
 });
@@ -325,18 +357,30 @@ app.post("/create-invoice", auth, async function (req, res) {
   const amount = Number(req.body.amount);
   const numberId = Number(req.body.numberId);
 
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return res.status(400).json({ error: "Amount must be positive" });
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return res.status(400).json({
+      error: "Amount must be a positive whole number of satoshis"
+    });
   }
 
-  const selectedNumber = numbers.find(function (item) { return item.id === numberId; });
+  const selectedNumber = numbers.find(function (item) {
+    return item.id === numberId;
+  });
 
   if (!selectedNumber) {
-    return res.status(400).json({ error: "Number does not exist" });
+    return res.status(400).json({
+      error: "Number does not exist"
+    });
   }
 
   try {
-    const payload = { amount: amount, currency: "CHF", description: "SMSNero service payment" };
+    const payload = {
+      amount: amount,
+      amountSats: amount,
+      currency: "SATS",
+      description: "SMSNero Lightning payment"
+    };
+
     const response = await fetch(SWISS_API_URL + "/v1/payment", {
       method: "POST",
       headers: {
@@ -347,16 +391,22 @@ app.post("/create-invoice", auth, async function (req, res) {
       body: JSON.stringify(payload)
     });
 
-    const data = await response.json().catch(function () { return {}; });
+    const data = await response.json().catch(function () {
+      return {};
+    });
 
     if (!response.ok) {
-      return res.status(502).json({ error: "Payment provider rejected invoice" });
+      return res.status(502).json({
+        error: "Payment provider rejected invoice"
+      });
     }
 
     const checkoutUrl = data.checkoutUrl || data.url;
 
     if (!checkoutUrl) {
-      return res.status(502).json({ error: "Payment provider did not return checkout URL" });
+      return res.status(502).json({
+        error: "Payment provider did not return checkout URL"
+      });
     }
 
     const invoice = {
@@ -374,7 +424,9 @@ app.post("/create-invoice", auth, async function (req, res) {
     invoices.push(invoice);
     return res.json(invoice);
   } catch (error) {
-    return res.status(500).json({ error: "Payment error" });
+    return res.status(500).json({
+      error: "Payment error"
+    });
   }
 });
 
@@ -383,7 +435,8 @@ app.post("/webhook", function (req, res) {
   const eventId = event.invoiceId || event.paymentId || event.id;
 
   const invoice = invoices.find(function (item) {
-    return String(item.id) === String(eventId) || String(item.providerPaymentId) === String(eventId);
+    return String(item.id) === String(eventId) ||
+      String(item.providerPaymentId) === String(eventId);
   });
 
   if (!invoice) {
@@ -392,6 +445,7 @@ app.post("/webhook", function (req, res) {
 
   if (event.status === "paid") {
     invoice.status = "paid";
+
     sessions.push({
       id: Date.now(),
       userId: invoice.userId,
@@ -408,7 +462,9 @@ app.post("/sms", function (req, res) {
   const text = String(req.body.text || "").trim();
 
   if (!number || !text) {
-    return res.status(400).json({ error: "number and text are required" });
+    return res.status(400).json({
+      error: "number and text are required"
+    });
   }
 
   const message = {
@@ -420,6 +476,7 @@ app.post("/sms", function (req, res) {
 
   messages.push(message);
   broadcast(message);
+
   return res.sendStatus(200);
 });
 
@@ -428,13 +485,19 @@ app.get("/messages", auth, function (req, res) {
 });
 
 app.get("/invoices", auth, function (req, res) {
-  const userInvoices = invoices.filter(function (item) { return item.userId === req.user.id; });
+  const userInvoices = invoices.filter(function (item) {
+    return item.userId === req.user.id;
+  });
+
   res.json(userInvoices);
 });
 
 wss.on("connection", function (socket) {
   sockets.add(socket);
-  socket.on("close", function () { sockets.delete(socket); });
+
+  socket.on("close", function () {
+    sockets.delete(socket);
+  });
 });
 
 server.listen(PORT, function () {
