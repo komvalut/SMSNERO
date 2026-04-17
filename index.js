@@ -1,93 +1,81 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const path = require('path');
+const http = require('http');
+const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
+const cors = require('cors');
+
 const app = express();
-const port = process.env.PORT || 3000;
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// Middleware
-app.use(bodyParser.json());
-app.use(bodyParser.text());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static('public'));
+const SECRET = 'test_tajna_123';
+const PORT = process.env.PORT || 3000;
 
-// Varijable koje čuvaju stanje
-let zadnjiKod = "Čekanje na uplatu...";
-let statusUplate = false;
+app.use(cors());
+app.use(express.json());
 
-// 1. RUTA: Ovo vidi kupac na ekranu
+// TESTNA RUTA: Da simuliraš dolazak SMS-a (pozovi ovo iz browsera ili preko kurla)
+app.get('/test-sms', (req, res) => {
+    const msg = { 
+        number: '+46700123456', 
+        text: 'Your login code is 554433', 
+        otp: '554433', 
+        time: new Date() 
+    };
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(msg));
+    });
+    res.send('Test SMS poslat na dashboard!');
+});
+
+// LOGIN RUTA
+app.post('/register', (req, res) => {
+    const user = { id: Date.now(), username: 'Tester' };
+    const token = jwt.sign(user, SECRET);
+    res.json({ token });
+});
+
+// FRONTEND
 app.get('/', (req, res) => {
     res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>P2P Market - Isplata</title>
-            <meta charset="UTF-8">
-            <style>
-                body { background: #121212; color: white; font-family: sans-serif; text-align: center; padding-top: 50px; }
-                .box { border: 2px dashed #ff9900; padding: 20px; display: inline-block; border-radius: 15px; background: #1e1e1e; min-width: 300px; }
-                h1 { color: #ff9900; }
-                #kod { font-size: 24px; font-weight: bold; margin: 20px; color: #00ff00; letter-spacing: 2px; }
-                .btn { background: white; color: black; padding: 10px 20px; border-radius: 10px; text-decoration: none; cursor: pointer; border: none; font-weight: bold; }
-            </style>
-            <script>
-                setInterval(async () => {
-                    const response = await fetch('/proveri-status');
-                    const data = await response.json();
-                    if(data.uplaceno) {
-                        document.getElementById('kod').innerText = data.kod;
-                    }
-                }, 2000);
-            </script>
-        </head>
-        <body>
-            <div class="box">
-                <h1>✅ TVOJ KOD:</h1>
-                <div id="kod">Skeniraj QR i plati...</div>
-                <br>
-                <button class="btn" onclick="window.location.reload()">ZATVORI</button>
-            </div>
-        </body>
-        </html>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <title>SMSNero TEST</title>
+        <style>
+            body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
+            .msg { border-bottom: 1px dashed #0f0; padding: 10px; margin-bottom: 10px; }
+            .otp { background: #0f0; color: #000; font-weight: bold; padding: 2px 5px; }
+        </style>
+    </head>
+    <body>
+        <h1>SMSNero Live Test</h1>
+        <button onclick="connect()" id="btn">Start System</button>
+        <div id="status"></div>
+        <div id="logs"></div>
+
+        <script>
+            let token = '';
+            async function connect() {
+                const res = await fetch('/register', { method: 'POST' });
+                const data = await res.json();
+                token = data.token;
+                document.getElementById('btn').style.display = 'none';
+                document.getElementById('status').innerText = 'System Online... Waiting for SMS...';
+                
+                const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(protocol + '//' + location.host);
+                
+                ws.onmessage = (e) => {
+                    const m = JSON.parse(e.data);
+                    const log = document.getElementById('logs');
+                    log.innerHTML = '<div class="msg">[' + new Date().toLocaleTimeString() + '] Number: ' + m.number + '<br>Text: ' + m.text + '<br>Code: <span class="otp">' + m.otp + '</span></div>' + log.innerHTML;
+                };
+            }
+        </script>
+    </body>
+    </html>
     `);
 });
 
-// 2. RUTA: Telefon šalje SMS ovde
-app.post('/api/incoming-sms', (req, res) => {
-    console.log("Podaci sa telefona:", req.body);
-    
-    let poruka = null;
-    
-    if (req.body && req.body.message) {
-        poruka = req.body.message;
-    } else if (typeof req.body === 'string' && req.body.length > 0) {
-        poruka = req.body;
-    }
-
-    if (poruka && !poruka.includes("%SMS_BODY%")) {
-        zadnjiKod = poruka;
-        statusUplate = true;
-        console.log("STIGAO KOD:", zadnjiKod);
-        return res.status(200).send("OK");
-    }
-    
-    return res.status(400).send("Greska: Nema poruke");
-});
-
-// 3. RUTA: Provera za kupčev ekran
-app.get('/proveri-status', (req, res) => {
-    res.json({
-        uplaceno: statusUplate,
-        kod: zadnjiKod
-    });
-    
-    // Reset nakon što kupac dobije kod
-    if (statusUplate) {
-        statusUplate = false;
-        zadnjiKod = "Čekanje na uplatu...";
-    }
-});
-
-// Startovanje servera
-app.listen(port, () => {
-    console.log("Server radi na portu: " + port);
-});
+server.listen(PORT, () => console.log('Server running on ' + PORT));
