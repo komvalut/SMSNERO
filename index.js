@@ -55,9 +55,12 @@ function base64url(value) {
   return Buffer.from(value).toString("base64url");
 }
 
+// FIX 1: signToken now includes `exp` so tokens actually expire
 function signToken(payload) {
+  const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24h
+  const fullPayload = Object.assign({}, payload, { exp: expiresAt });
   const header = base64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = base64url(JSON.stringify(payload));
+  const body = base64url(JSON.stringify(fullPayload));
   const signature = crypto
     .createHmac("sha256", JWT_SECRET)
     .update(header + "." + body)
@@ -65,6 +68,8 @@ function signToken(payload) {
   return header + "." + body + "." + signature;
 }
 
+// FIX 2: verifyToken pads both buffers to the same length before timingSafeEqual,
+//         and now also checks the `exp` claim
 function verifyToken(token) {
   const parts = String(token || "").split(".");
   if (parts.length !== 3) throw new Error("Invalid token");
@@ -74,17 +79,26 @@ function verifyToken(token) {
     .update(parts[0] + "." + parts[1])
     .digest("base64url");
 
-  const received = Buffer.from(parts[2]);
-  const expectedBuf = Buffer.from(expected);
+  // Ensure equal-length buffers so timingSafeEqual never throws
+  const receivedStr = parts[2];
+  const maxLen = Math.max(receivedStr.length, expected.length);
+  const a = Buffer.alloc(maxLen);
+  const b = Buffer.alloc(maxLen);
+  Buffer.from(receivedStr).copy(a);
+  Buffer.from(expected).copy(b);
 
-  if (
-    received.length !== expectedBuf.length ||
-    !crypto.timingSafeEqual(received, expectedBuf)
-  ) {
+  if (!crypto.timingSafeEqual(a, b)) {
     throw new Error("Invalid token signature");
   }
 
-  return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+
+  // Check expiry
+  if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) {
+    throw new Error("Token expired");
+  }
+
+  return payload;
 }
 
 function auth(req, res, next) {
@@ -441,9 +455,25 @@ function pageHtml() {
 
     const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
     const ws = new WebSocket(wsProtocol + location.host);
-    ws.onmessage = function () {
-      loadMessages();
-      loadSessions();
+
+    // FIX 3: Parse event type and only refresh what changed
+    ws.onmessage = function (event) {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "sms") {
+          loadMessages();
+        } else if (msg.type === "invoice_paid") {
+          loadSessions();
+          loadMessages();
+        } else {
+          // fallback: refresh everything
+          loadSessions();
+          loadMessages();
+        }
+      } catch (e) {
+        loadSessions();
+        loadMessages();
+      }
     };
 
     if (token) refreshAll();
@@ -483,12 +513,28 @@ app.post("/register", async function (req, res) {
   }
 });
 
-app.post("/admin/login", function (req, res) {
+// FIX 4: Admin login uses a real DB user (id != 0) to avoid FK constraint violations
+app.post("/admin/login", async function (req, res) {
   if (String((req.body && req.body.password) || "") !== ADMIN_PASSWORD) {
     return res.status(403).json({ error: "Wrong admin password" });
   }
-  const user = { id: 0, username: "admin", role: "admin" };
-  return res.json({ token: signToken(user), user });
+  try {
+    // Upsert a stable admin user in the DB so FK references work
+    const result = await pool.query(`
+      INSERT INTO users (username, role) VALUES ('admin', 'admin')
+      ON CONFLICT (username) DO UPDATE SET role = 'admin'
+      RETURNING id, username, role
+    `);
+    // ON CONFLICT requires unique index on username — add it if not present:
+    // CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique ON users(username);
+    const user = result.rows[0];
+    return res.json({ token: signToken(user), user });
+  } catch (err) {
+    // Fallback: synthetic admin token if upsert fails (e.g. no unique index yet)
+    console.warn("admin upsert failed, using synthetic token:", err.message);
+    const user = { id: 0, username: "admin", role: "admin" };
+    return res.json({ token: signToken(user), user });
+  }
 });
 
 app.get("/numbers", auth, async function (req, res) {
@@ -521,279 +567,4 @@ app.post("/admin/numbers", auth, adminOnly, async function (req, res) {
 
   if (!number || !/^\+[1-9]\d{7,14}$/.test(number)) {
     return res.status(400).json({
-      error: "Use international phone format, for example +46700000001",
-    });
-  }
-
-  if (!Number.isInteger(priceSats) || priceSats <= 0) {
-    return res.status(400).json({
-      error: "Price must be a positive whole number of satoshis",
-    });
-  }
-
-  try {
-    const result = await pool.query(
-      `INSERT INTO numbers (phone_number, price_sats, active)
-       VALUES ($1, $2, TRUE)
-       ON CONFLICT (phone_number) DO UPDATE SET price_sats = EXCLUDED.price_sats, active = TRUE
-       RETURNING id, phone_number, price_sats, active`,
-      [number, priceSats]
-    );
-    return res.json(result.rows[0]);
-  } catch (err) {
-    console.error("add number error", err);
-    return res.status(500).json({ error: "Could not save number" });
-  }
-});
-
-app.delete("/admin/numbers/:id", auth, adminOnly, async function (req, res) {
-  try {
-    await pool.query("UPDATE numbers SET active = FALSE WHERE id = $1", [req.params.id]);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("delete number error", err);
-    res.status(500).json({ error: "Could not disable number" });
-  }
-});
-
-app.post("/create-invoice", auth, async function (req, res) {
-  if (req.user.role === "admin") {
-    return res.status(400).json({ error: "Admin cannot buy numbers" });
-  }
-
-  if (!SWISS_API_KEY || !SWISS_SECRET_KEY) {
-    return res.status(503).json({
-      error:
-        "Payment is not configured. Add SWISS_API_KEY and SWISS_SECRET_KEY in environment variables.",
-    });
-  }
-
-  const numberId = Number(req.body && req.body.numberId);
-  if (!Number.isInteger(numberId) || numberId <= 0) {
-    return res.status(400).json({ error: "Invalid number id" });
-  }
-
-  try {
-    const numberResult = await pool.query(
-      "SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE",
-      [numberId]
-    );
-    const number = numberResult.rows[0];
-    if (!number) return res.status(400).json({ error: "Number does not exist" });
-
-    const payload = {
-      amount: number.price_sats,
-      amountSats: number.price_sats,
-      currency: "SATS",
-      description: "SMSNero Lightning payment",
-    };
-
-    const response = await fetch(SWISS_API_URL + "/v1/payment", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": SWISS_API_KEY,
-        "x-signature": signPayload(payload),
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await response.json().catch(function () { return {}; });
-    if (!response.ok) {
-      console.error("provider rejected invoice", response.status, data);
-      return res.status(502).json({ error: "Payment provider rejected invoice" });
-    }
-
-    const checkoutUrl = data.checkoutUrl || data.url;
-    if (!checkoutUrl) {
-      return res.status(502).json({ error: "Payment provider did not return checkout URL" });
-    }
-
-    const qr = await QRCode.toDataURL(checkoutUrl);
-
-    const result = await pool.query(
-      `INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr)
-       VALUES ($1, $2, $3, $4, 'pending', $5, $6)
-       RETURNING id, provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, created_at`,
-      [data.id || data.paymentId || null, req.user.id, number.id, number.price_sats, checkoutUrl, qr]
-    );
-
-    return res.json(result.rows[0]);
-  } catch (err) {
-    console.error("create-invoice error", err);
-    return res.status(500).json({ error: "Payment error" });
-  }
-});
-
-// Provider webhook: marks invoice paid + creates session
-app.post("/webhook", async function (req, res) {
-  try {
-    const event = req.body || {};
-    const eventId = event.invoiceId || event.paymentId || event.id;
-    const status = String(event.status || "").toLowerCase();
-
-    if (!eventId) return res.status(400).json({ error: "Missing event id" });
-
-    const invoiceResult = await pool.query(
-      "SELECT * FROM invoices WHERE id::text = $1 OR provider_payment_id = $1 LIMIT 1",
-      [String(eventId)]
-    );
-    const invoice = invoiceResult.rows[0];
-    if (!invoice) return res.sendStatus(404);
-
-    if (status === "paid" || status === "settled" || status === "confirmed") {
-      if (invoice.status === "paid") return res.json({ ok: true, duplicate: true });
-
-      await pool.query("UPDATE invoices SET status = 'paid' WHERE id = $1", [invoice.id]);
-
-      const expiresAt = new Date(Date.now() + SESSION_MINUTES * 60 * 1000);
-      const sessionResult = await pool.query(
-        `INSERT INTO sessions (user_id, number_id, invoice_id, expires_at)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, user_id, number_id, expires_at`,
-        [invoice.user_id, invoice.number_id, invoice.id, expiresAt]
-      );
-
-      broadcast({ type: "invoice_paid", invoiceId: invoice.id, session: sessionResult.rows[0] });
-      return res.json({ ok: true });
-    }
-
-    if (status === "expired" || status === "failed" || status === "cancelled") {
-      await pool.query("UPDATE invoices SET status = $1 WHERE id = $2", [status, invoice.id]);
-      return res.json({ ok: true });
-    }
-
-    return res.json({ ok: true, ignored: true });
-  } catch (err) {
-    console.error("webhook error", err);
-    return res.status(500).json({ error: "Webhook error" });
-  }
-});
-
-// Incoming SMS webhook from SMS provider. Verify HMAC in `x-signature` header.
-app.post("/sms-webhook", async function (req, res) {
-  try {
-    if (!SMS_WEBHOOK_SECRET) {
-      return res.status(503).json({ error: "SMS webhook not configured" });
-    }
-
-    const provided = String(req.headers["x-signature"] || "");
-    const expected = crypto
-      .createHmac("sha256", SMS_WEBHOOK_SECRET)
-      .update(JSON.stringify(req.body || {}))
-      .digest("hex");
-
-    const a = Buffer.from(provided);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(403).json({ error: "Invalid signature" });
-    }
-
-    const phoneNumber = String((req.body && (req.body.to || req.body.phoneNumber)) || "").trim();
-    const text = String((req.body && (req.body.text || req.body.message)) || "").trim();
-    if (!phoneNumber || !text) {
-      return res.status(400).json({ error: "Missing phoneNumber or text" });
-    }
-
-    const numberRow = await pool.query(
-      "SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1",
-      [phoneNumber]
-    );
-    const numberId = numberRow.rows[0] ? numberRow.rows[0].id : null;
-    const otp = extractOTP(text);
-
-    const result = await pool.query(
-      `INSERT INTO messages (number_id, phone_number, text, otp)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, number_id, phone_number, text, otp, created_at`,
-      [numberId, phoneNumber, text, otp]
-    );
-
-    broadcast({ type: "sms", message: result.rows[0] });
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("sms-webhook error", err);
-    return res.status(500).json({ error: "SMS webhook error" });
-  }
-});
-
-// User's currently active numbers (paid + not expired)
-app.get("/my-numbers", auth, async function (req, res) {
-  if (req.user.role === "admin") return res.json([]);
-  try {
-    const result = await pool.query(
-      `SELECT s.id, s.expires_at, n.phone_number, n.id AS number_id
-         FROM sessions s
-         JOIN numbers n ON n.id = s.number_id
-        WHERE s.user_id = $1 AND s.expires_at > NOW()
-        ORDER BY s.expires_at DESC`,
-      [req.user.id]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("my-numbers error", err);
-    res.status(500).json({ error: "Database error" });
-  }
-});
-
-// Messages visible to the requester:
-//  - admin sees all recent messages
-//  - users see only messages for numbers they currently have an active session on
-app.get("/messages", auth, async function (req, res) {
-  try {
-    if (req.user.role === "admin") {
-      const result = await pool.query(
-        `SELECT id, number_id, phone_number, text, otp, created_at
-           FROM messages ORDER BY id DESC LIMIT 100`
-      );
-      return res.json(result.rows);
-    }
-
-    const result = await pool.query(
-      `SELECT m.id, m.number_id, m.phone_number, m.text, m.otp, m.created_at
-         FROM messages m
-         JOIN sessions s ON s.number_id = m.number_id
-        WHERE s.user_id = $1
-          AND s.expires_at > NOW()
-          AND m.created_at >= s.created_at
-        ORDER BY m.id DESC
-        LIMIT 100`,
-      [req.user.id]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("messages error", err);
-    res.status(500).json({ error: "Database error" });
-  }
-});
-
-// ---------- WebSocket ----------
-
-wss.on("connection", function (socket) {
-  sockets.add(socket);
-  socket.on("close", function () { sockets.delete(socket); });
-  socket.on("error", function () { sockets.delete(socket); });
-});
-
-// ---------- startup ----------
-
-initDb()
-  .then(function () {
-    server.listen(PORT, function () {
-      console.log("SMSNero listening on port " + PORT);
-    });
-  })
-  .catch(function (err) {
-    console.error("DB init failed", err);
-    process.exit(1);
-  });
-
-function shutdown() {
-  console.log("Shutting down...");
-  server.close(function () {
-    pool.end().finally(function () { process.exit(0); });
-  });
-  setTimeout(function () { process.exit(1); }, 10000).unref();
-}
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+      error: "Use international phone format, for example +46700000
