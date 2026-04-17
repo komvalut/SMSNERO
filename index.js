@@ -1,3 +1,19 @@
+// SMSNero - Production server
+// Node.js + Express + PostgreSQL + WebSocket + Swiss Bitcoin Pay (Lightning)
+//
+// Required env vars:
+//   DATABASE_URL          PostgreSQL connection string
+//   JWT_SECRET            Secret for signing JWTs (or SESSION_SECRET)
+//   ADMIN_PASSWORD        Plain admin password
+//   SWISS_API_KEY         Swiss Bitcoin Pay API key
+//   SWISS_SECRET_KEY      Swiss Bitcoin Pay HMAC secret
+//   SMS_WEBHOOK_SECRET    Shared HMAC secret for incoming SMS webhooks
+// Optional:
+//   SWISS_API_URL         defaults to https://api.swiss-bitcoin-pay.ch
+//   PORT                  defaults to 3000
+//   NODE_ENV              "production" enables SSL for Postgres
+//   SESSION_MINUTES       active number lifetime in minutes (default 30)
+
 const express = require("express");
 const http = require("http");
 const crypto = require("crypto");
@@ -17,6 +33,7 @@ const SMS_WEBHOOK_SECRET = process.env.SMS_WEBHOOK_SECRET;
 const SWISS_API_KEY = process.env.SWISS_API_KEY;
 const SWISS_SECRET_KEY = process.env.SWISS_SECRET_KEY;
 const SWISS_API_URL = process.env.SWISS_API_URL || "https://api.swiss-bitcoin-pay.ch";
+const SESSION_MINUTES = Number(process.env.SESSION_MINUTES || 30);
 
 if (!DATABASE_URL) throw new Error("DATABASE_URL is required");
 if (!JWT_SECRET) throw new Error("JWT_SECRET is required");
@@ -24,13 +41,15 @@ if (!ADMIN_PASSWORD) throw new Error("ADMIN_PASSWORD is required");
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
 const sockets = new Set();
 const rateBuckets = new Map();
 
 app.use(express.json({ limit: "1mb" }));
+
+// ---------- helpers ----------
 
 function base64url(value) {
   return Buffer.from(value).toString("base64url");
@@ -43,7 +62,6 @@ function signToken(payload) {
     .createHmac("sha256", JWT_SECRET)
     .update(header + "." + body)
     .digest("base64url");
-
   return header + "." + body + "." + signature;
 }
 
@@ -56,12 +74,12 @@ function verifyToken(token) {
     .update(parts[0] + "." + parts[1])
     .digest("base64url");
 
-  const receivedBuffer = Buffer.from(parts[2]);
-  const expectedBuffer = Buffer.from(expected);
+  const received = Buffer.from(parts[2]);
+  const expectedBuf = Buffer.from(expected);
 
   if (
-    receivedBuffer.length !== expectedBuffer.length ||
-    !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)
+    received.length !== expectedBuf.length ||
+    !crypto.timingSafeEqual(received, expectedBuf)
   ) {
     throw new Error("Invalid token signature");
   }
@@ -72,9 +90,7 @@ function verifyToken(token) {
 function auth(req, res, next) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : header;
-
   if (!token) return res.status(401).json({ error: "Missing token" });
-
   try {
     req.user = verifyToken(token);
     return next();
@@ -87,7 +103,6 @@ function adminOnly(req, res, next) {
   if (!req.user || req.user.role !== "admin") {
     return res.status(403).json({ error: "Admin access required" });
   }
-
   return next();
 }
 
@@ -109,9 +124,16 @@ function rateLimit(req, res, next) {
   return next();
 }
 
+// Periodic cleanup of stale rate-limit buckets
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (bucket.resetAt <= now) rateBuckets.delete(key);
+  }
+}, 5 * 60 * 1000).unref();
+
 function signPayload(payload) {
   if (!SWISS_SECRET_KEY) throw new Error("SWISS_SECRET_KEY is missing");
-
   return crypto
     .createHmac("sha256", SWISS_SECRET_KEY)
     .update(JSON.stringify(payload))
@@ -125,11 +147,12 @@ function extractOTP(text) {
 
 function broadcast(message) {
   const payload = JSON.stringify(message);
-
   for (const socket of sockets) {
     if (socket.readyState === WebSocket.OPEN) socket.send(payload);
   }
 }
+
+// ---------- database ----------
 
 async function initDb() {
   await pool.query(`
@@ -187,6 +210,8 @@ async function initDb() {
     )
   `);
 }
+
+// ---------- HTML page ----------
 
 function pageHtml() {
   return `<!DOCTYPE html>
@@ -297,7 +322,6 @@ function pageHtml() {
         box.innerHTML = "";
         return;
       }
-
       box.style.display = "block";
       box.innerHTML =
         "<h3>Admin panel</h3>" +
@@ -305,26 +329,19 @@ function pageHtml() {
         "<input id='adminPrice' type='number' min='1' step='1' placeholder='price in sats'>" +
         "<button onclick='adminAddNumber()'>Add number</button>" +
         "<div id='adminList'></div>";
-
       loadAdminNumbers();
     }
 
     async function adminAddNumber() {
       const number = document.getElementById("adminNumber").value;
       const priceSats = Number(document.getElementById("adminPrice").value);
-
       const response = await fetch("/admin/numbers", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ number: number, priceSats: priceSats })
       });
-
-      const data = await response.json().catch(function () {
-        return { error: "Error" };
-      });
-
+      const data = await response.json().catch(function () { return { error: "Error" }; });
       if (!response.ok) return setStatus(data.error || "Could not add number.", true);
-
       setStatus("Number saved in database.", false);
       loadAdminNumbers();
       loadNumbers();
@@ -335,9 +352,7 @@ function pageHtml() {
         method: "DELETE",
         headers: authHeaders()
       });
-
       if (!response.ok) return setStatus("Could not delete number.", true);
-
       setStatus("Number disabled.", false);
       loadAdminNumbers();
       loadNumbers();
@@ -345,51 +360,32 @@ function pageHtml() {
 
     async function loadAdminNumbers() {
       if (role !== "admin") return;
-
-      const response = await fetch("/admin/numbers", {
-        headers: authHeaders()
-      });
-
+      const response = await fetch("/admin/numbers", { headers: authHeaders() });
       if (!response.ok) return;
-
       const data = await response.json();
       let html = "";
-
       data.forEach(function (item) {
         html += "<div class='box row'><span>" +
-          escapeHtml(item.phone_number) +
-          " - " +
-          escapeHtml(item.price_sats) +
-          " sats</span><button onclick='adminDeleteNumber(" +
-          item.id +
-          ")'>Disable</button></div>";
+          escapeHtml(item.phone_number) + " - " +
+          escapeHtml(item.price_sats) + " sats" +
+          (item.active ? "" : " (disabled)") +
+          "</span><button onclick='adminDeleteNumber(" + item.id + ")'>Disable</button></div>";
       });
-
       document.getElementById("adminList").innerHTML = html || "<p class='muted'>No numbers yet.</p>";
     }
 
     async function loadNumbers() {
       if (!token) return;
-
-      const response = await fetch("/numbers", {
-        headers: authHeaders()
-      });
-
+      const response = await fetch("/numbers", { headers: authHeaders() });
       if (!response.ok) return setStatus("Login again.", true);
-
       const data = await response.json();
       let html = "<h3>Available numbers</h3>";
-
       data.forEach(function (item) {
         html += "<div class='box row'><span>" +
-          escapeHtml(item.phone_number) +
-          " - " +
+          escapeHtml(item.phone_number) + " - " +
           escapeHtml(item.price_sats) +
-          " sats</span><button onclick='buyNumber(" +
-          item.id +
-          ")'>Buy</button></div>";
+          " sats</span><button onclick='buyNumber(" + item.id + ")'>Buy</button></div>";
       });
-
       document.getElementById("numbers").innerHTML = html || "No numbers available.";
     }
 
@@ -399,68 +395,40 @@ function pageHtml() {
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ numberId: id })
       });
-
-      const invoice = await response.json().catch(function () {
-        return { error: "Payment error" };
-      });
-
+      const invoice = await response.json().catch(function () { return { error: "Payment error" }; });
       if (!response.ok) return setStatus(invoice.error || "Payment error.", true);
-
       document.getElementById("qr").innerHTML =
         "<div class='box'><h3>Scan Lightning QR</h3><p>Amount: " +
-        escapeHtml(invoice.amount_sats) +
-        " sats</p><img src='" +
-        invoice.qr +
-        "' width='200' alt='QR code'><br><a href='" +
-        escapeHtml(invoice.checkout_url) +
-        "' target='_blank'>Open Checkout</a></div>";
+        escapeHtml(invoice.amount_sats) + " sats</p><img src='" +
+        invoice.qr + "' width='200' alt='QR code'><br><a href='" +
+        escapeHtml(invoice.checkout_url) + "' target='_blank'>Open Checkout</a></div>";
     }
 
     async function loadSessions() {
       if (!token || role === "admin") return;
-
-      const response = await fetch("/my-numbers", {
-        headers: authHeaders()
-      });
-
+      const response = await fetch("/my-numbers", { headers: authHeaders() });
       if (!response.ok) return;
-
       const data = await response.json();
       let html = "<h3>My active numbers</h3>";
-
+      if (!data.length) html += "<p class='muted'>No active numbers.</p>";
       data.forEach(function (item) {
-        html += "<div>" +
-          escapeHtml(item.phone_number) +
-          " active until " +
-          escapeHtml(new Date(item.expires_at).toLocaleString()) +
-          "</div>";
+        html += "<div>" + escapeHtml(item.phone_number) +
+          " active until " + escapeHtml(new Date(item.expires_at).toLocaleString()) + "</div>";
       });
-
       document.getElementById("sessions").innerHTML = html;
     }
 
     async function loadMessages() {
       if (!token) return;
-
-      const response = await fetch("/messages", {
-        headers: authHeaders()
-      });
-
+      const response = await fetch("/messages", { headers: authHeaders() });
       if (!response.ok) return;
-
       const data = await response.json();
       let html = "<h3>OTP Inbox</h3>";
-
+      if (!data.length) html += "<p class='muted'>No messages yet.</p>";
       data.forEach(function (item) {
-        html += "<div>" +
-          escapeHtml(item.phone_number) +
-          ": " +
-          escapeHtml(item.text) +
-          " (" +
-          escapeHtml(item.otp || "") +
-          ")</div>";
+        html += "<div>" + escapeHtml(item.phone_number) + ": " +
+          escapeHtml(item.text) + " (" + escapeHtml(item.otp || "") + ")</div>";
       });
-
       document.getElementById("otp").innerHTML = html;
     }
 
@@ -473,9 +441,9 @@ function pageHtml() {
 
     const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
     const ws = new WebSocket(wsProtocol + location.host);
-
     ws.onmessage = function () {
       loadMessages();
+      loadSessions();
     };
 
     if (token) refreshAll();
@@ -483,6 +451,8 @@ function pageHtml() {
 </body>
 </html>`;
 }
+
+// ---------- routes ----------
 
 app.use(rateLimit);
 
@@ -499,84 +469,91 @@ app.get("/", function (req, res) {
 });
 
 app.post("/register", async function (req, res) {
-  const username = "user" + Date.now();
-
-  const result = await pool.query(
-    "INSERT INTO users (username, role) VALUES ($1, 'user') RETURNING id, username, role",
-    [username]
-  );
-
-  const user = result.rows[0];
-
-  res.json({
-    token: signToken(user),
-    user: user
-  });
+  try {
+    const username = "user" + Date.now();
+    const result = await pool.query(
+      "INSERT INTO users (username, role) VALUES ($1, 'user') RETURNING id, username, role",
+      [username]
+    );
+    const user = result.rows[0];
+    res.json({ token: signToken(user), user });
+  } catch (err) {
+    console.error("register error", err);
+    res.status(500).json({ error: "Could not register user" });
+  }
 });
 
 app.post("/admin/login", function (req, res) {
-  if (String(req.body.password || "") !== ADMIN_PASSWORD) {
+  if (String((req.body && req.body.password) || "") !== ADMIN_PASSWORD) {
     return res.status(403).json({ error: "Wrong admin password" });
   }
-
-  const user = {
-    id: 0,
-    username: "admin",
-    role: "admin"
-  };
-
-  return res.json({
-    token: signToken(user),
-    user: user
-  });
+  const user = { id: 0, username: "admin", role: "admin" };
+  return res.json({ token: signToken(user), user });
 });
 
 app.get("/numbers", auth, async function (req, res) {
-  const result = await pool.query(
-    "SELECT id, phone_number, price_sats FROM numbers WHERE active = TRUE ORDER BY id DESC"
-  );
-
-  res.json(result.rows);
+  try {
+    const result = await pool.query(
+      "SELECT id, phone_number, price_sats FROM numbers WHERE active = TRUE ORDER BY id DESC"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("numbers error", err);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 app.get("/admin/numbers", auth, adminOnly, async function (req, res) {
-  const result = await pool.query(
-    "SELECT id, phone_number, price_sats, active, created_at FROM numbers ORDER BY id DESC"
-  );
-
-  res.json(result.rows);
+  try {
+    const result = await pool.query(
+      "SELECT id, phone_number, price_sats, active, created_at FROM numbers ORDER BY id DESC"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("admin numbers error", err);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 app.post("/admin/numbers", auth, adminOnly, async function (req, res) {
-  const number = String(req.body.number || "").trim();
-  const priceSats = Number(req.body.priceSats);
+  const number = String((req.body && req.body.number) || "").trim();
+  const priceSats = Number(req.body && req.body.priceSats);
 
   if (!number || !/^\+[1-9]\d{7,14}$/.test(number)) {
     return res.status(400).json({
-      error: "Use international phone format, for example +46700000001"
+      error: "Use international phone format, for example +46700000001",
     });
   }
 
   if (!Number.isInteger(priceSats) || priceSats <= 0) {
     return res.status(400).json({
-      error: "Price must be a positive whole number of satoshis"
+      error: "Price must be a positive whole number of satoshis",
     });
   }
 
-  const result = await pool.query(
-    `INSERT INTO numbers (phone_number, price_sats, active)
-     VALUES ($1, $2, TRUE)
-     ON CONFLICT (phone_number) DO UPDATE SET price_sats = EXCLUDED.price_sats, active = TRUE
-     RETURNING id, phone_number, price_sats, active`,
-    [number, priceSats]
-  );
-
-  return res.json(result.rows[0]);
+  try {
+    const result = await pool.query(
+      `INSERT INTO numbers (phone_number, price_sats, active)
+       VALUES ($1, $2, TRUE)
+       ON CONFLICT (phone_number) DO UPDATE SET price_sats = EXCLUDED.price_sats, active = TRUE
+       RETURNING id, phone_number, price_sats, active`,
+      [number, priceSats]
+    );
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("add number error", err);
+    return res.status(500).json({ error: "Could not save number" });
+  }
 });
 
 app.delete("/admin/numbers/:id", auth, adminOnly, async function (req, res) {
-  await pool.query("UPDATE numbers SET active = FALSE WHERE id = $1", [req.params.id]);
-  res.json({ ok: true });
+  try {
+    await pool.query("UPDATE numbers SET active = FALSE WHERE id = $1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("delete number error", err);
+    res.status(500).json({ error: "Could not disable number" });
+  }
 });
 
 app.post("/create-invoice", auth, async function (req, res) {
@@ -586,29 +563,29 @@ app.post("/create-invoice", auth, async function (req, res) {
 
   if (!SWISS_API_KEY || !SWISS_SECRET_KEY) {
     return res.status(503).json({
-      error: "Payment is not configured. Add SWISS_API_KEY and SWISS_SECRET_KEY in Render environment variables."
+      error:
+        "Payment is not configured. Add SWISS_API_KEY and SWISS_SECRET_KEY in environment variables.",
     });
   }
 
-  const numberId = Number(req.body.numberId);
-
-  const numberResult = await pool.query(
-    "SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE",
-    [numberId]
-  );
-
-  const number = numberResult.rows[0];
-
-  if (!number) {
-    return res.status(400).json({ error: "Number does not exist" });
+  const numberId = Number(req.body && req.body.numberId);
+  if (!Number.isInteger(numberId) || numberId <= 0) {
+    return res.status(400).json({ error: "Invalid number id" });
   }
 
   try {
+    const numberResult = await pool.query(
+      "SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE",
+      [numberId]
+    );
+    const number = numberResult.rows[0];
+    if (!number) return res.status(400).json({ error: "Number does not exist" });
+
     const payload = {
       amount: number.price_sats,
       amountSats: number.price_sats,
       currency: "SATS",
-      description: "SMSNero Lightning payment"
+      description: "SMSNero Lightning payment",
     };
 
     const response = await fetch(SWISS_API_URL + "/v1/payment", {
@@ -616,21 +593,18 @@ app.post("/create-invoice", auth, async function (req, res) {
       headers: {
         "Content-Type": "application/json",
         "x-api-key": SWISS_API_KEY,
-        "x-signature": signPayload(payload)
+        "x-signature": signPayload(payload),
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
     });
 
-    const data = await response.json().catch(function () {
-      return {};
-    });
-
+    const data = await response.json().catch(function () { return {}; });
     if (!response.ok) {
+      console.error("provider rejected invoice", response.status, data);
       return res.status(502).json({ error: "Payment provider rejected invoice" });
     }
 
     const checkoutUrl = data.checkoutUrl || data.url;
-
     if (!checkoutUrl) {
       return res.status(502).json({ error: "Payment provider did not return checkout URL" });
     }
@@ -645,23 +619,181 @@ app.post("/create-invoice", auth, async function (req, res) {
     );
 
     return res.json(result.rows[0]);
-  } catch {
+  } catch (err) {
+    console.error("create-invoice error", err);
     return res.status(500).json({ error: "Payment error" });
   }
 });
 
+// Provider webhook: marks invoice paid + creates session
 app.post("/webhook", async function (req, res) {
-  const event = req.body || {};
-  const eventId = event.invoiceId || event.paymentId || event.id;
-  const status = String(event.status || "").toLowerCase();
+  try {
+    const event = req.body || {};
+    const eventId = event.invoiceId || event.paymentId || event.id;
+    const status = String(event.status || "").toLowerCase();
 
-  const invoiceResult = await pool.query(
-    "SELECT * FROM invoices WHERE id::text = $1 OR provider_payment_id = $1 LIMIT 1",
-    [String(eventId || "")]
-  );
+    if (!eventId) return res.status(400).json({ error: "Missing event id" });
 
-  const invoice = invoiceResult.rows[0];
+    const invoiceResult = await pool.query(
+      "SELECT * FROM invoices WHERE id::text = $1 OR provider_payment_id = $1 LIMIT 1",
+      [String(eventId)]
+    );
+    const invoice = invoiceResult.rows[0];
+    if (!invoice) return res.sendStatus(404);
 
-  if (!invoice) return res.sendStatus(404);
+    if (status === "paid" || status === "settled" || status === "confirmed") {
+      if (invoice.status === "paid") return res.json({ ok: true, duplicate: true });
 
-  if (status === "paid" || status === "settled" || status === "confirmed") {
+      await pool.query("UPDATE invoices SET status = 'paid' WHERE id = $1", [invoice.id]);
+
+      const expiresAt = new Date(Date.now() + SESSION_MINUTES * 60 * 1000);
+      const sessionResult = await pool.query(
+        `INSERT INTO sessions (user_id, number_id, invoice_id, expires_at)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, user_id, number_id, expires_at`,
+        [invoice.user_id, invoice.number_id, invoice.id, expiresAt]
+      );
+
+      broadcast({ type: "invoice_paid", invoiceId: invoice.id, session: sessionResult.rows[0] });
+      return res.json({ ok: true });
+    }
+
+    if (status === "expired" || status === "failed" || status === "cancelled") {
+      await pool.query("UPDATE invoices SET status = $1 WHERE id = $2", [status, invoice.id]);
+      return res.json({ ok: true });
+    }
+
+    return res.json({ ok: true, ignored: true });
+  } catch (err) {
+    console.error("webhook error", err);
+    return res.status(500).json({ error: "Webhook error" });
+  }
+});
+
+// Incoming SMS webhook from SMS provider. Verify HMAC in `x-signature` header.
+app.post("/sms-webhook", async function (req, res) {
+  try {
+    if (!SMS_WEBHOOK_SECRET) {
+      return res.status(503).json({ error: "SMS webhook not configured" });
+    }
+
+    const provided = String(req.headers["x-signature"] || "");
+    const expected = crypto
+      .createHmac("sha256", SMS_WEBHOOK_SECRET)
+      .update(JSON.stringify(req.body || {}))
+      .digest("hex");
+
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(403).json({ error: "Invalid signature" });
+    }
+
+    const phoneNumber = String((req.body && (req.body.to || req.body.phoneNumber)) || "").trim();
+    const text = String((req.body && (req.body.text || req.body.message)) || "").trim();
+    if (!phoneNumber || !text) {
+      return res.status(400).json({ error: "Missing phoneNumber or text" });
+    }
+
+    const numberRow = await pool.query(
+      "SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1",
+      [phoneNumber]
+    );
+    const numberId = numberRow.rows[0] ? numberRow.rows[0].id : null;
+    const otp = extractOTP(text);
+
+    const result = await pool.query(
+      `INSERT INTO messages (number_id, phone_number, text, otp)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, number_id, phone_number, text, otp, created_at`,
+      [numberId, phoneNumber, text, otp]
+    );
+
+    broadcast({ type: "sms", message: result.rows[0] });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("sms-webhook error", err);
+    return res.status(500).json({ error: "SMS webhook error" });
+  }
+});
+
+// User's currently active numbers (paid + not expired)
+app.get("/my-numbers", auth, async function (req, res) {
+  if (req.user.role === "admin") return res.json([]);
+  try {
+    const result = await pool.query(
+      `SELECT s.id, s.expires_at, n.phone_number, n.id AS number_id
+         FROM sessions s
+         JOIN numbers n ON n.id = s.number_id
+        WHERE s.user_id = $1 AND s.expires_at > NOW()
+        ORDER BY s.expires_at DESC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("my-numbers error", err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+// Messages visible to the requester:
+//  - admin sees all recent messages
+//  - users see only messages for numbers they currently have an active session on
+app.get("/messages", auth, async function (req, res) {
+  try {
+    if (req.user.role === "admin") {
+      const result = await pool.query(
+        `SELECT id, number_id, phone_number, text, otp, created_at
+           FROM messages ORDER BY id DESC LIMIT 100`
+      );
+      return res.json(result.rows);
+    }
+
+    const result = await pool.query(
+      `SELECT m.id, m.number_id, m.phone_number, m.text, m.otp, m.created_at
+         FROM messages m
+         JOIN sessions s ON s.number_id = m.number_id
+        WHERE s.user_id = $1
+          AND s.expires_at > NOW()
+          AND m.created_at >= s.created_at
+        ORDER BY m.id DESC
+        LIMIT 100`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("messages error", err);
+    res.status(500).json({ error: "Database error" });
+  }
+});
+
+// ---------- WebSocket ----------
+
+wss.on("connection", function (socket) {
+  sockets.add(socket);
+  socket.on("close", function () { sockets.delete(socket); });
+  socket.on("error", function () { sockets.delete(socket); });
+});
+
+// ---------- startup ----------
+
+initDb()
+  .then(function () {
+    server.listen(PORT, function () {
+      console.log("SMSNero listening on port " + PORT);
+    });
+  })
+  .catch(function (err) {
+    console.error("DB init failed", err);
+    process.exit(1);
+  });
+
+function shutdown() {
+  console.log("Shutting down...");
+  server.close(function () {
+    pool.end().finally(function () { process.exit(0); });
+  });
+  setTimeout(function () { process.exit(1); }, 10000).unref();
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
