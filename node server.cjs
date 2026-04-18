@@ -1,3 +1,5 @@
+use strict";
+
 const express = require("express")";
 const http = require("http");
 const crypto = require("crypto");
@@ -349,7 +351,7 @@ tElementById("numbers").innerHTML = "Login or register to load numbers.";
       data.forEach(function (item) {
         const statusLabel = item.active ? "active" : "disabled";
         html += "<div class='box row'><span>" +
-          escapeHtml(item.phone_number) + " — " +
+          escapeHtml(item.phone_number) + " â€” " +
           escapeHtml(item.price_sats) + " sats [" + statusLabel + "]" +
           "</span><button onclick='adminDeleteNumber(" + item.id + ")'>Disable</button></div>";
       });
@@ -367,7 +369,7 @@ tElementById("numbers").innerHTML = "Login or register to load numbers.";
       }
       data.forEach(function (item) {
         html += "<div class='box row'><span>" +
-          escapeHtml(item.phone_number) + " — " +
+          escapeHtml(item.phone_number) + " â€” " +
           escapeHtml(item.price_sats) + " sats" +
           "</span><button onclick='buyNumber(" + item.id + ")'>Buy</button></div>";
       });
@@ -404,7 +406,7 @@ tElementById("numbers").innerHTML = "Login or register to load numbers.";
       data.forEach(function (item) {
         html += "<div class='box'>" +
           "<strong>" + escapeHtml(item.phone_number) + "</strong>" +
-          " — active until " + escapeHtml(new Date(item.expires_at).toLocaleString()) +
+          " â€” active until " + escapeHtml(new Date(item.expires_at).toLocaleString()) +
           "</div>";
       });
       document.getElementById("sessions").innerHTML = html;
@@ -576,7 +578,7 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
     amount: number.price_sats,
     amountSats: number.price_sats,
     currency: "SATS",
-    description: "SMSNero — " + number.phone_number,
+    description: "SMSNero â€” " + number.phone_number,
   };
 
   const response = await fetch(SWISS_API_URL + "/v1/payment", {
