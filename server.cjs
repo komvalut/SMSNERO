@@ -300,8 +300,8 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   });
   const data = await response.json().catch(function() { return {}; });
   if (!response.ok) {
-    console.error("Swiss Bitcoin Pay error:", JSON.stringify(data));
-    return res.status(502).json({ error: "Payment error: " + (data.message || data.error || JSON.stringify(data)) });
+    console.error("Swiss Bitcoin Pay HTTP status:", response.status, "body:", JSON.stringify(data));
+    return res.status(502).json({ error: "Payment error HTTP " + response.status + ": " + (data.message || data.error || data.detail || JSON.stringify(data)) });
   }
   const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl || data.payment_url;
   if (!checkoutUrl) {
