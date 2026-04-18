@@ -298,10 +298,12 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
     headers: { "Content-Type": "application/json", "api-key": SWISS_API_KEY },
     body: JSON.stringify(payload),
   });
-  const data = await response.json().catch(function() { return {}; });
+  const rawText = await response.text().catch(function() { return ""; });
+  let data = {};
+  try { data = JSON.parse(rawText); } catch(e) {}
   if (!response.ok) {
-    console.error("Swiss Bitcoin Pay HTTP status:", response.status, "body:", JSON.stringify(data));
-    return res.status(502).json({ error: "Payment error HTTP " + response.status + ": " + (data.message || data.error || data.detail || JSON.stringify(data)) });
+    console.error("Swiss Bitcoin Pay HTTP status:", response.status, "body:", rawText.slice(0, 500));
+    return res.status(502).json({ error: "Payment error HTTP " + response.status + ": " + (data.message || data.error || data.detail || rawText.slice(0, 200) || "empty response") });
   }
   const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl || data.payment_url;
   if (!checkoutUrl) {
