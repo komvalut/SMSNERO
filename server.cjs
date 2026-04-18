@@ -186,7 +186,7 @@ const HTML = `<!DOCTYPE html>
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; "+esc(i.price_sats)+" sats ["+(i.active?"active":"disabled")+"]</span><button onclick='delNum("+i.id+")'>Disable</button></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
     async function loadNumbers(){if(!token)return;var r=await fetch("/numbers",{headers:authH()});if(!r.ok)return setStatus("Login again.",true);var data=await r.json();var h="<h3>Available numbers</h3>";if(!data.length)h+="<p class='muted'>No numbers available.</p>";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; "+esc(i.price_sats)+" sats</span><button onclick='buyNum("+i.id+")'>Buy</button></div>";});document.getElementById("numbers").innerHTML=h;}
-    async function buyNum(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='200' alt='QR'><br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open Checkout</a></div>";}
+    async function buyNum(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);var copyBtn="";if(inv.lightning_invoice){copyBtn="<br><textarea style='width:100%;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly onclick='this.select()'>"+esc(inv.lightning_invoice)+"</textarea><br><button onclick=\"navigator.clipboard.writeText('"+inv.lightning_invoice.replace(/'/g,"\\'")+"').then(function(){setStatus('Copied!',false);})\" style='margin-top:4px;'>Copy Lightning Invoice</button>";}document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+copyBtn+(inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;'>Open in Browser</a>":"")+"</div>";}
     async function loadSessions(){if(!token||role==="admin")return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="<h3>My active numbers</h3>";if(!data.length)h+="<p class='muted'>No active numbers yet.</p>";data.forEach(function(i){h+="<div class='box'><strong>"+esc(i.phone_number)+"</strong> &mdash; active until "+esc(new Date(i.expires_at).toLocaleString())+"</div>";});document.getElementById("sessions").innerHTML=h;}
     async function loadMessages(){if(!token)return;var r=await fetch("/messages",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="<h3>OTP Inbox</h3>";if(!data.length)h+="<p class='muted'>No messages yet.</p>";data.forEach(function(i){h+="<div class='box'><span class='muted'>"+esc(i.phone_number)+"</span><br>"+esc(i.text)+(i.otp?" <strong style='color:#facc15;font-size:1.2em'>"+esc(i.otp)+"</strong>":"")+"<br><span class='muted' style='font-size:0.85em'>"+esc(new Date(i.created_at).toLocaleString())+"</span></div>";});document.getElementById("otp").innerHTML=h;}
     function refreshAll(){renderAdmin();loadNumbers();loadSessions();loadMessages();}
@@ -306,16 +306,20 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
     return res.status(502).json({ error: "Payment error HTTP " + response.status + ": " + (data.message || data.error || data.detail || rawText.slice(0, 200) || "empty response") });
   }
   const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl || data.payment_url;
-  if (!checkoutUrl) {
+  const lightningInvoice = data.pr || data.paymentRequest || null;
+  if (!checkoutUrl && !lightningInvoice) {
     console.error("Swiss Bitcoin Pay no URL:", JSON.stringify(data));
     return res.status(502).json({ error: "No checkout URL returned. Response: " + JSON.stringify(data) });
   }
-  const qr = await QRCode.toDataURL(checkoutUrl);
+  const qrSource = lightningInvoice || checkoutUrl;
+  const qr = await QRCode.toDataURL(qrSource);
   const result = await pool.query(
     "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr) VALUES ($1, $2, $3, $4, 'pending', $5, $6) RETURNING *",
-    [data.id || data.paymentId || null, req.user.id, number.id, number.price_sats, checkoutUrl, qr]
+    [data.id || null, req.user.id, number.id, number.price_sats, checkoutUrl || qrSource, qr]
   );
-  return res.json(result.rows[0]);
+  const row = result.rows[0];
+  row.lightning_invoice = lightningInvoice;
+  return res.json(row);
 }));
 
 app.post("/webhook", wrap(async function(req, res) {
