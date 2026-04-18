@@ -296,7 +296,7 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
     unit: "sat",
     onChain: false,
     delay: 10,
-    webhook: appUrl + "/webhook"
+    webhook: { url: appUrl + "/webhook" }
   };
   const response = await fetch(SWISS_API_URL + "/checkout", {
     method: "POST",
@@ -329,6 +329,7 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
 
 app.post("/webhook", wrap(async function(req, res) {
   const event = req.body || {};
+  console.log("Webhook received from Swiss Bitcoin Pay:", JSON.stringify(event));
   const eventId = event.invoiceId || event.paymentId || event.id;
   const status = String(event.status || "").toLowerCase();
   if (!eventId) return res.sendStatus(400);
