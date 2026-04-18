@@ -354,18 +354,31 @@ app.post("/webhook", wrap(async function(req, res) {
 
 app.post("/sms-webhook", wrap(async function(req, res) {
   const body = req.body || {};
-  console.log("SMS webhook received:", JSON.stringify(body));
-  const phoneNumber = String(body.from || body.phone || body.number || body.sender || body.originator || body.msisdn || "").trim();
+  console.log("SMS webhook received:", JSON.stringify(body), "query:", JSON.stringify(req.query));
+  const sender = String(body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
   const text = String(body.text || body.message || body.body || body.sms || body.content || "").trim();
-  if (!phoneNumber || !text) {
+  if (!sender || !text) {
     console.log("SMS webhook missing fields, body was:", JSON.stringify(body));
     return res.status(400).json({ error: "Missing sender and text fields", received: Object.keys(body) });
   }
-  const numberResult = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [phoneNumber]);
-  const numberId = numberResult.rows.length ? numberResult.rows[0].id : null;
+  // Find which of our rented numbers received this SMS:
+  // 1. Check explicit "to" field in body or query param
+  // 2. Fallback: use any currently active rented number
+  const toField = String(req.query.to || req.query.number || body.to || body.recipient || body.number || "").trim();
+  let numberId = null;
+  if (toField) {
+    const toResult = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [toField]);
+    if (toResult.rows.length) numberId = toResult.rows[0].id;
+  }
+  if (!numberId) {
+    // Fallback: assign to the most recently active rented number
+    const activeResult = await pool.query("SELECT number_id FROM sessions WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1");
+    if (activeResult.rows.length) numberId = activeResult.rows[0].number_id;
+  }
+  console.log("SMS assigned to number_id:", numberId, "from:", sender);
   const otp = extractOTP(text);
-  await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, phoneNumber, text, otp]);
-  broadcast({ type: "message", phoneNumber: phoneNumber, text: text, otp: otp });
+  await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, sender, text, otp]);
+  broadcast({ type: "message", phoneNumber: sender, text: text, otp: otp });
   return res.sendStatus(200);
 }));
 
