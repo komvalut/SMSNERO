@@ -182,7 +182,8 @@ const HTML = `<!DOCTYPE html>
     function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
-    function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button><div id='adminList'></div>";loadAdminNums();}
+    async function testSMS(){var n=prompt("Phone number (e.g. +46705536378):");if(!n)return;var t=prompt("SMS text (e.g. Your code is 123456):");if(!t)return;var r=await fetch("/test-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,text:t})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Test SMS injected! OTP: "+(d.otp||"none"),false);loadMessages();}
+    function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div>";loadAdminNums();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; "+esc(i.price_sats)+" sats ["+(i.active?"active":"disabled")+"]</span><button onclick='delNum("+i.id+")'>Disable</button></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
@@ -246,13 +247,12 @@ app.get("/messages", auth, wrap(async function(req, res) {
     const result = await pool.query("SELECT id, phone_number, text, otp, created_at FROM messages WHERE phone_number NOT LIKE '\\%%' ORDER BY created_at DESC LIMIT 200");
     return res.json(result.rows);
   }
-  const sessResult = await pool.query("SELECT number_id, created_at FROM sessions WHERE user_id = $1 AND expires_at > NOW() ORDER BY created_at DESC", [req.user.id]);
+  const sessResult = await pool.query("SELECT number_id FROM sessions WHERE user_id = $1 AND expires_at > NOW() ORDER BY created_at DESC", [req.user.id]);
   if (!sessResult.rows.length) return res.json([]);
   const ids = sessResult.rows.map(function(r) { return r.number_id; });
-  const since = sessResult.rows[sessResult.rows.length - 1].created_at;
   const result = await pool.query(
-    "SELECT id, phone_number, text, otp, created_at FROM messages WHERE number_id = ANY($1) AND phone_number NOT LIKE '\\%%' AND created_at >= $2 ORDER BY created_at DESC LIMIT 200",
-    [ids, since]
+    "SELECT id, phone_number, text, otp, created_at FROM messages WHERE number_id = ANY($1) AND phone_number NOT LIKE '\\%%' ORDER BY created_at DESC LIMIT 200",
+    [ids]
   );
   res.json(result.rows);
 }));
@@ -354,6 +354,18 @@ app.post("/webhook", wrap(async function(req, res) {
     await pool.query("UPDATE invoices SET status = $1 WHERE id = $2", [status, invoice.id]);
   }
   return res.sendStatus(200);
+}));
+
+app.post("/test-sms", auth, adminOnly, wrap(async function(req, res) {
+  const { number, text } = req.body || {};
+  if (!number || !text) return res.status(400).json({ error: "Need number and text" });
+  const numRes = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [number]);
+  if (!numRes.rows.length) return res.status(404).json({ error: "Number not found" });
+  const numberId = numRes.rows[0].id;
+  const otp = extractOTP(text);
+  await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, "+000test", text, otp]);
+  broadcast({ type: "message", phoneNumber: "+000test", text: text, otp: otp });
+  return res.json({ ok: true, otp: otp });
 }));
 
 app.post("/sms-webhook", wrap(async function(req, res) {
