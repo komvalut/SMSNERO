@@ -355,8 +355,8 @@ app.post("/webhook", wrap(async function(req, res) {
 app.post("/sms-webhook", wrap(async function(req, res) {
   const body = req.body || {};
   console.log("SMS webhook received:", JSON.stringify(body), "query:", JSON.stringify(req.query));
-  const sender = String(body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
-  const text = String(body.text || body.message || body.body || body.sms || body.content || "").trim();
+  const sender = String(req.query.from || req.query.sender || body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
+  const text = String(req.query.text || req.query.body || req.query.message || body.text || body.message || body.body || body.sms || body.content || "").trim();
   if (!sender || !text) {
     console.log("SMS webhook missing fields, body was:", JSON.stringify(body));
     return res.status(400).json({ error: "Missing sender and text fields", received: Object.keys(body) });
