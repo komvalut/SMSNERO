@@ -287,13 +287,15 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   const numberResult = await pool.query("SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE", [numberId]);
   const number = numberResult.rows[0];
   if (!number) return res.status(400).json({ error: "Number not available" });
+  const appUrl = process.env.APP_URL || ("https://" + (process.env.RENDER_EXTERNAL_HOSTNAME || "smsnero.onrender.com"));
   const payload = {
     title: "SMSNero",
     description: "Phone number: " + number.phone_number,
     amount: number.price_sats,
     unit: "sat",
     onChain: false,
-    delay: 10
+    delay: 10,
+    webhook: appUrl + "/webhook"
   };
   const response = await fetch(SWISS_API_URL + "/checkout", {
     method: "POST",
