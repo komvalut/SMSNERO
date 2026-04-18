@@ -285,16 +285,29 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   const numberResult = await pool.query("SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE", [numberId]);
   const number = numberResult.rows[0];
   if (!number) return res.status(400).json({ error: "Number not available" });
-  const payload = { amount: number.price_sats, amountSats: number.price_sats, currency: "SATS", description: "SMSNero - " + number.phone_number };
-  const response = await fetch(SWISS_API_URL + "/v1/payment", {
+  const payload = {
+    title: "SMSNero",
+    description: "Phone number: " + number.phone_number,
+    amount: number.price_sats,
+    unit: "sat",
+    onChain: false,
+    delay: 10
+  };
+  const response = await fetch(SWISS_API_URL + "/v1/checkout", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": SWISS_API_KEY, "x-signature": signPayload(payload) },
+    headers: { "Content-Type": "application/json", "api-key": SWISS_API_KEY },
     body: JSON.stringify(payload),
   });
   const data = await response.json().catch(function() { return {}; });
-  if (!response.ok) return res.status(502).json({ error: "Payment provider rejected the invoice" });
-  const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl;
-  if (!checkoutUrl) return res.status(502).json({ error: "No checkout URL returned" });
+  if (!response.ok) {
+    console.error("Swiss Bitcoin Pay error:", JSON.stringify(data));
+    return res.status(502).json({ error: "Payment error: " + (data.message || data.error || JSON.stringify(data)) });
+  }
+  const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl || data.payment_url;
+  if (!checkoutUrl) {
+    console.error("Swiss Bitcoin Pay no URL:", JSON.stringify(data));
+    return res.status(502).json({ error: "No checkout URL returned. Response: " + JSON.stringify(data) });
+  }
   const qr = await QRCode.toDataURL(checkoutUrl);
   const result = await pool.query(
     "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr) VALUES ($1, $2, $3, $4, 'pending', $5, $6) RETURNING *",
