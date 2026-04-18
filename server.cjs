@@ -33,6 +33,7 @@ const sockets = new Set();
 const rateBuckets = new Map();
 
 app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 function base64url(value) {
   return Buffer.from(value).toString("base64url");
@@ -349,9 +350,13 @@ app.post("/webhook", wrap(async function(req, res) {
 
 app.post("/sms-webhook", wrap(async function(req, res) {
   const body = req.body || {};
-  const phoneNumber = String(body.from || body.phone || body.number || "").trim();
-  const text = String(body.text || body.message || body.body || "").trim();
-  if (!phoneNumber || !text) return res.status(400).json({ error: "Missing 'from' and 'text' fields" });
+  console.log("SMS webhook received:", JSON.stringify(body));
+  const phoneNumber = String(body.from || body.phone || body.number || body.sender || body.originator || body.msisdn || "").trim();
+  const text = String(body.text || body.message || body.body || body.sms || body.content || "").trim();
+  if (!phoneNumber || !text) {
+    console.log("SMS webhook missing fields, body was:", JSON.stringify(body));
+    return res.status(400).json({ error: "Missing sender and text fields", received: Object.keys(body) });
+  }
   const numberResult = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [phoneNumber]);
   const numberId = numberResult.rows.length ? numberResult.rows[0].id : null;
   const otp = extractOTP(text);
