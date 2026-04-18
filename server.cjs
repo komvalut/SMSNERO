@@ -293,7 +293,7 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
     onChain: false,
     delay: 10
   };
-  const response = await fetch(SWISS_API_URL + "/v1/checkout", {
+  const response = await fetch(SWISS_API_URL + "/checkout", {
     method: "POST",
     headers: { "Content-Type": "application/json", "api-key": SWISS_API_KEY },
     body: JSON.stringify(payload),
