@@ -370,12 +370,16 @@ app.post("/test-sms", auth, adminOnly, wrap(async function(req, res) {
 
 app.post("/sms-webhook", wrap(async function(req, res) {
   const body = req.body || {};
-  console.log("SMS webhook received:", JSON.stringify(body), "query:", JSON.stringify(req.query));
-  const sender = String(req.query.from || req.query.sender || body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
-  const text = String(req.query.text || req.query.body || req.query.message || body.text || body.message || body.body || body.sms || body.content || "").trim();
+  console.log("=== SMS WEBHOOK ===");
+  console.log("Query:", JSON.stringify(req.query));
+  console.log("Body:", JSON.stringify(body));
+  console.log("Headers content-type:", req.headers["content-type"]);
+  const sender = String(req.query.from || req.query.sender || req.query.originator || body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
+  const text = String(req.query.text || req.query.body || req.query.message || req.query.sms || body.text || body.message || body.body || body.sms || body.content || "").trim();
+  console.log("Parsed sender:", sender, "text:", text);
   if (!sender || !text) {
-    console.log("SMS webhook missing fields, body was:", JSON.stringify(body));
-    return res.status(400).json({ error: "Missing sender and text fields", received: Object.keys(body) });
+    console.log("SMS webhook missing fields");
+    return res.status(400).json({ error: "Missing sender and text fields", received: { query: req.query, body: body } });
   }
   // Find which of our rented numbers received this SMS:
   // 1. Check explicit "to" field in body or query param
