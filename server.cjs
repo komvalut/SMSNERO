@@ -190,7 +190,8 @@ const HTML = `<!DOCTYPE html>
     function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div>";loadAdminNums();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
-    async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; "+esc(i.price_sats)+" sats ["+(i.active?"active":"disabled")+"]</span><button onclick='delNum("+i.id+")'>Disable</button></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
+    async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; <strong>"+esc(i.price_sats)+" sats</strong> ["+(i.active?"active":"disabled")+"]</span><span style='display:flex;gap:6px;'><button onclick='editPrice("+i.id+","+i.price_sats+")' style='background:#6366f1;color:white;'>Edit price</button><button onclick='delNum("+i.id+")'>Disable</button></span></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
+    async function editPrice(id,current){var p=prompt("New price in sats (current: "+current+"):");if(!p)return;var n=Number(p);if(!Number.isInteger(n)||n<=0)return setStatus("Invalid price.",true);var r=await fetch("/admin/numbers/"+id+"/price",{method:"PUT",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({priceSats:n})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Price updated to "+n+" sats.",false);loadAdminNums();loadNumbers();}
     var COUNTRIES=["Sweden","USA","UK","Germany","France","Netherlands","Poland","Spain","Italy","Romania","Ukraine","Russia","Turkey","Brazil","India","Canada","Australia","Belgium","Czech Republic","Hungary","Portugal","Finland","Norway","Denmark","Switzerland","Austria","Greece","Serbia","Croatia","Bosnia","Slovenia","Slovakia","Bulgaria","Estonia","Latvia","Lithuania","Other"];
     var SERVICES=["Telegram","WhatsApp","Viber","Signal","Instagram","Facebook","Twitter / X","TikTok","Snapchat","Google","Apple","Microsoft","Amazon","Netflix","Uber","Airbnb","LinkedIn","Discord","Tinder","Bumble","Other"];
     async function loadNumbers(){if(!token)return;var r=await fetch("/numbers",{headers:authH()});if(!r.ok)return setStatus("Login again.",true);var data=await r.json();var h="<h3>Available numbers</h3>";if(!data.length)h+="<p class='muted'>No numbers available.</p>";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; "+esc(i.price_sats)+" sats</span><button onclick='showBuyPanel("+i.id+",\""+esc(i.phone_number)+"\","+esc(i.price_sats)+")'>Buy</button></div>";});document.getElementById("numbers").innerHTML=h;}
@@ -290,6 +291,16 @@ app.delete("/admin/numbers/:id", auth, adminOnly, wrap(async function(req, res) 
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid number ID" });
   await pool.query("UPDATE numbers SET active = FALSE WHERE id = $1", [id]);
   res.json({ ok: true });
+}));
+
+app.put("/admin/numbers/:id/price", auth, adminOnly, wrap(async function(req, res) {
+  const id = Number(req.params.id);
+  const priceSats = Number(req.body.priceSats);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid number ID" });
+  if (!Number.isInteger(priceSats) || priceSats <= 0) return res.status(400).json({ error: "Price must be a positive whole number of satoshis" });
+  const result = await pool.query("UPDATE numbers SET price_sats = $1 WHERE id = $2 RETURNING id, phone_number, price_sats, active", [priceSats, id]);
+  if (!result.rows.length) return res.status(404).json({ error: "Number not found" });
+  res.json(result.rows[0]);
 }));
 
 app.post("/create-invoice", auth, wrap(async function(req, res) {
