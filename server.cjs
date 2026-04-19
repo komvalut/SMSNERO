@@ -140,6 +140,7 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS p2p_listings (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, phone_number TEXT NOT NULL, price_sats INTEGER NOT NULL CHECK (price_sats > 0), description TEXT, active BOOLEAN NOT NULL DEFAULT TRUE, approved BOOLEAN NOT NULL DEFAULT FALSE, owner_earned_sats INTEGER NOT NULL DEFAULT 0, owner_paid_sats INTEGER NOT NULL DEFAULT 0, number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS p2p_listing_id BIGINT REFERENCES p2p_listings(id) ON DELETE SET NULL`);
   await pool.query(`ALTER TABLE p2p_listings ADD COLUMN IF NOT EXISTS number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS outbox (id BIGSERIAL PRIMARY KEY, recipient TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   console.log("Database initialized.");
 }
 
@@ -195,10 +196,28 @@ const HTML = `<!DOCTYPE html>
       <div id="p2p-my-listings"></div>
     </div>
     <div id="tab-send" style="display:none">
-      <div class="box" style="text-align:center;padding:40px">
+      <div class="box" id="send-form-box" style="display:none">
         <h3>Send SMS</h3>
-        <p class="muted">Coming soon &mdash; requires an outbound SMS gateway (e.g. Twilio).</p>
-        <p class="muted" style="font-size:0.85em;">Contact admin to enable this feature.</p>
+        <p class="muted" style="font-size:0.88em;">Messages are sent from your SIM via MacroDroid. MacroDroid must be running and polling.</p>
+        <div style="display:flex;flex-direction:column;gap:8px;max-width:480px;">
+          <input id="send-recipient" placeholder="Recipient number (+38761...)" style="width:100%">
+          <textarea id="send-message" placeholder="Message text..." rows="4" style="width:100%;box-sizing:border-box;resize:vertical;"></textarea>
+          <button onclick="sendSMS()" style="width:100%;">Send</button>
+        </div>
+      </div>
+      <div class="box" id="send-login-box"><p class="muted">Login as admin to send SMS.</p></div>
+      <div class="box" id="send-outbox" style="display:none"><h3>Outbox</h3><div id="outbox-list"><p class="muted">No messages yet.</p></div></div>
+      <div class="box" style="background:#1a1a2e;border:1px solid #3333aa;" id="send-setup-box" style="display:none">
+        <h4 style="color:#a5b4fc;">MacroDroid Setup</h4>
+        <p class="muted" style="font-size:0.87em;">Create a new macro in MacroDroid:</p>
+        <ol style="color:#ccc;font-size:0.87em;line-height:1.8em;">
+          <li><strong>Trigger:</strong> Periodic timer &mdash; every <strong>30 seconds</strong></li>
+          <li><strong>Action 1:</strong> HTTP Request GET &rarr; URL:<br><code id="poll-url" style="color:#facc15;word-break:break-all;"></code></li>
+          <li><strong>Action 2:</strong> If variable <em>http_response_body</em> NOT empty &rarr; parse JSON</li>
+          <li><strong>Action 3:</strong> Send SMS to <em>[id_recipient]</em> with text <em>[id_message]</em></li>
+          <li><strong>Action 4:</strong> HTTP Request GET &rarr; URL:<br><code id="ack-url" style="color:#a5b4fc;word-break:break-all;"></code></li>
+        </ol>
+        <p class="muted" style="font-size:0.82em;">MacroDroid čita red čekanja, šalje SMS sa SIM kartice i potvrđuje isporuku.</p>
       </div>
     </div>
   </main>
@@ -210,7 +229,7 @@ const HTML = `<!DOCTYPE html>
     function setStatus(msg,err){var el=document.getElementById("status");el.className=err?"error":"muted";el.textContent=msg;}
     function authH(ex){return Object.assign({},ex||{},{Authorization:"Bearer "+token});}
     function saveSession(d){token=d.token;role=d.user.role;localStorage.setItem("smsnero_token",token);localStorage.setItem("smsnero_role",role);}
-    function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}}
+    function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}if(name==="send"){renderSendTab();}}
     function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
@@ -227,6 +246,9 @@ const HTML = `<!DOCTYPE html>
     async function submitP2P(){var phone=document.getElementById("p2p-phone").value.trim();var price=Number(document.getElementById("p2p-price").value);var desc=document.getElementById("p2p-desc").value.trim();if(!phone||!price)return setStatus("Enter phone number and price.",true);var r=await fetch("/p2p/submit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({phoneNumber:phone,priceSats:price,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Listing submitted! Waiting for admin approval.",false);document.getElementById("p2p-phone").value="";document.getElementById("p2p-price").value="";document.getElementById("p2p-desc").value="";loadMyP2PListings();}
     async function loadP2PMarket(){if(!token)return;var r=await fetch("/p2p/market",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No listings in the marketplace yet. Be the first to list your number!</p>";data.forEach(function(i){h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='buyP2P("+i.id+")'>Buy</button></div>";});document.getElementById("p2p-market").innerHTML=h;}
     async function loadMyP2PListings(){if(!token)return;var r=await fetch("/p2p/my-listings",{headers:authH()});if(!r.ok)return;var data=await r.json();if(!data.length){document.getElementById("p2p-my-listings").innerHTML="";document.getElementById("p2p-submit-box").style.display="block";return;}document.getElementById("p2p-submit-box").style.display="block";var h="<div class='box'><h4>My listings</h4>";data.forEach(function(i){var earned=i.owner_earned_sats||0;var paid=i.owner_paid_sats||0;h+="<div class='box' style='margin:8px 0;'><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats &mdash; <span style='color:"+(i.approved?"#4ade80":"#fca5a5")+"'>"+(i.approved?"Active":"Pending approval")+"</span><br><span class='muted' style='font-size:0.85em;'>Earned: "+earned+" sats | Paid out: "+paid+" sats | Owed: "+(earned-paid)+" sats</span></div>";});h+="</div>";document.getElementById("p2p-my-listings").innerHTML=h;}
+    function renderSendTab(){var isAdmin=role==="admin";document.getElementById("send-form-box").style.display=isAdmin?"block":"none";document.getElementById("send-login-box").style.display=isAdmin?"none":"block";document.getElementById("send-outbox").style.display=isAdmin?"block":"none";document.getElementById("send-setup-box").style.display=isAdmin?"block":"none";if(isAdmin){var base=location.origin;var key=token;document.getElementById("poll-url").textContent=base+"/api/pending-sms?key="+key;document.getElementById("ack-url").textContent=base+"/api/sms-sent/[id]?key="+key;loadOutbox();}}
+    async function sendSMS(){var recipient=document.getElementById("send-recipient").value.trim();var message=document.getElementById("send-message").value.trim();if(!recipient||!message)return setStatus("Enter recipient and message.",true);var r=await fetch("/admin/send-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({recipient:recipient,message:message})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Message queued for delivery.",false);document.getElementById("send-recipient").value="";document.getElementById("send-message").value="";loadOutbox();}
+    async function loadOutbox(){if(role!=="admin")return;var r=await fetch("/admin/outbox",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No messages yet.</p>";data.forEach(function(i){var col=i.status==="sent"?"#4ade80":i.status==="failed"?"#fca5a5":"#facc15";h+="<div class='box row'><span><strong>"+esc(i.recipient)+"</strong><br><span class='muted' style='font-size:0.87em;'>"+esc(i.message)+"</span></span><span style='color:"+col+";font-weight:bold;font-size:0.9em;'>"+esc(i.status)+"<br><span style='color:#666;font-size:0.8em;'>"+esc(new Date(i.created_at).toLocaleString())+"</span></span></div>";});document.getElementById("outbox-list").innerHTML=h;}
     var _p2pData={};
     async function buyP2P(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({p2pListingId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open in Browser</a>":"";switchTab("rent");document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR (P2P)</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"</div>";startPolling();}
     var COUNTRIES=["Sweden","USA","UK","Germany","France","Netherlands","Poland","Spain","Italy","Romania","Ukraine","Russia","Turkey","Brazil","India","Canada","Australia","Belgium","Czech Republic","Hungary","Portugal","Finland","Norway","Denmark","Switzerland","Austria","Greece","Serbia","Croatia","Bosnia","Slovenia","Slovakia","Bulgaria","Estonia","Latvia","Lithuania","Other"];
@@ -552,6 +574,49 @@ app.post("/admin/p2p/:id/payout", auth, adminOnly, wrap(async function(req, res)
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
   if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
   await pool.query("UPDATE p2p_listings SET owner_paid_sats = owner_paid_sats + $1 WHERE id = $2", [amount, id]);
+  res.json({ ok: true });
+}));
+
+// SEND SMS: admin queues a message
+app.post("/admin/send-sms", auth, adminOnly, wrap(async function(req, res) {
+  const recipient = String(req.body.recipient || "").trim();
+  const message = String(req.body.message || "").trim();
+  if (!recipient || !message) return res.status(400).json({ error: "recipient and message required" });
+  const r = await pool.query(
+    "INSERT INTO outbox (recipient, message) VALUES ($1, $2) RETURNING id",
+    [recipient, message]
+  );
+  res.json({ ok: true, id: r.rows[0].id });
+}));
+
+// SEND SMS: admin views outbox
+app.get("/admin/outbox", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query("SELECT * FROM outbox ORDER BY created_at DESC LIMIT 100");
+  res.json(r.rows);
+}));
+
+// MacroDroid polling: returns next pending SMS (authenticated by admin token as query param)
+app.get("/api/pending-sms", wrap(async function(req, res) {
+  const key = String(req.query.key || "").trim();
+  if (!key) return res.status(401).json({ error: "Missing key" });
+  let user;
+  try { user = verifyToken(key); } catch(e) { return res.status(403).json({ error: "Invalid key" }); }
+  if (user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  const r = await pool.query("SELECT id, recipient, message FROM outbox WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1");
+  if (!r.rows.length) return res.status(204).send("");
+  res.json(r.rows[0]);
+}));
+
+// MacroDroid confirm: marks SMS as sent
+app.get("/api/sms-sent/:id", wrap(async function(req, res) {
+  const key = String(req.query.key || "").trim();
+  if (!key) return res.status(401).json({ error: "Missing key" });
+  let user;
+  try { user = verifyToken(key); } catch(e) { return res.status(403).json({ error: "Invalid key" }); }
+  if (user.role !== "admin") return res.status(403).json({ error: "Admin only" });
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
+  await pool.query("UPDATE outbox SET status = 'sent' WHERE id = $1", [id]);
   res.json({ ok: true });
 }));
 
