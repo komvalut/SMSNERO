@@ -191,7 +191,7 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div id="tab-p2p" style="display:none">
       <div class="box"><h3>P2P Market</h3><p class="muted">Numbers listed by the community. Pay via Bitcoin Lightning. Platform takes 50% commission.</p><div id="p2p-market"><p class="muted">Login to view marketplace.</p></div></div>
-      <div class="box" id="p2p-submit-box" style="display:none"><h3>List your number</h3><input id="p2p-phone" placeholder="+46700000001" style="width:180px"><input id="p2p-price" type="number" min="1" placeholder="Price in sats" style="width:150px"><input id="p2p-desc" placeholder="Description (optional)" style="width:220px"><br><button onclick="submitP2P()">Submit for approval</button><p class="muted" style="font-size:0.85em;margin-top:8px;">Your earnings (50%) are tracked and paid out by the admin.</p></div>
+      <div class="box" id="p2p-submit-box" style="display:none"><h3>List your number</h3><input id="p2p-phone" placeholder="+46700000001" style="width:180px"> <span style="display:inline-flex;align-items:center;gap:4px;"><input id="p2p-price" type="number" min="1" placeholder="0" style="width:110px"> <span style="color:#facc15;font-weight:bold;">sats</span></span> <input id="p2p-desc" placeholder="Description (optional)" style="width:220px"><br><button onclick="submitP2P()">Submit for approval</button><p class="muted" style="font-size:0.85em;margin-top:8px;">Your earnings (50%) are tracked and paid out by the admin. Price is in satoshis.</p></div>
       <div id="p2p-my-listings"></div>
     </div>
     <div id="tab-send" style="display:none">
