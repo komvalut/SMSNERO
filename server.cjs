@@ -147,6 +147,8 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS send_credits (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, send_number_id INTEGER NOT NULL REFERENCES send_numbers(id) ON DELETE CASCADE, invoice_id BIGINT, used BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS send_number_id INTEGER REFERENCES send_numbers(id) ON DELETE SET NULL`);
   await pool.query(`ALTER TABLE invoices ALTER COLUMN number_id DROP NOT NULL`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS is_deposit BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS wallets (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, balance_sats INTEGER NOT NULL DEFAULT 0)`);
   console.log("Database initialized.");
 }
 
@@ -183,6 +185,16 @@ const HTML = `<!DOCTYPE html>
       <button onclick="adminLogin()">Admin login</button>
       <button onclick="logout()">Logout</button>
       <div id="status" class="muted"></div>
+      <div id="wallet-bar" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #333;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span style="color:#facc15;font-weight:bold;">&#9889; Wallet: <span id="wallet-bal">0</span> sats</span>
+        <button onclick="showDepositForm()" style="padding:5px 12px;font-size:0.88em;">+ Deposit</button>
+        <div id="deposit-form" style="display:none;width:100%;margin-top:8px;">
+          <input id="dep-amount" type="number" min="100" placeholder="Amount in sats" style="width:160px">
+          <button onclick="doDeposit()" style="padding:6px 12px;">Pay via Lightning</button>
+          <button onclick="document.getElementById('deposit-form').style.display='none'" style="background:#333;color:#fff;padding:6px 10px;">Cancel</button>
+          <div id="deposit-qr" style="margin-top:8px;"></div>
+        </div>
+      </div>
     </div>
     <div id="admin" class="box" style="display:none"></div>
     <div class="tabs">
@@ -249,13 +261,20 @@ const HTML = `<!DOCTYPE html>
     function esc(v){return String(v).replace(/[&<>'"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]});}
     function setStatus(msg,err){var el=document.getElementById("status");el.className=err?"error":"muted";el.textContent=msg;}
     function authH(ex){return Object.assign({},ex||{},{Authorization:"Bearer "+token});}
-    function saveSession(d){token=d.token;role=d.user.role;localStorage.setItem("smsnero_token",token);localStorage.setItem("smsnero_role",role);}
+    function saveSession(d){token=d.token;role=d.user.role;localStorage.setItem("smsnero_token",token);localStorage.setItem("smsnero_role",role);requestNotifPerm();}
+    function requestNotifPerm(){if(typeof Notification!=="undefined"&&Notification.permission==="default")Notification.requestPermission();}
+    function showNotif(title,body){if(typeof Notification!=="undefined"&&Notification.permission==="granted"){try{new Notification(title,{body:body});}catch(e){}}}
+    function countdown(expiresAt){var ms=new Date(expiresAt)-Date.now();if(ms<=0)return"Expired";var h=Math.floor(ms/3600000);var m=Math.floor((ms%3600000)/60000);return h>0?h+"h "+m+"m left":m+"m left";}
+    async function loadWalletBalance(){if(!token||role==="admin"){document.getElementById("wallet-bar").style.display="none";return;}var r=await fetch("/wallet/balance",{headers:authH()});if(!r.ok)return;var d=await r.json();document.getElementById("wallet-bal").textContent=d.balance_sats;document.getElementById("wallet-bar").style.display="flex";}
+    function showDepositForm(){var f=document.getElementById("deposit-form");f.style.display=f.style.display==="none"?"block":"none";}
+    async function doDeposit(){var amt=Number(document.getElementById("dep-amount").value);if(!amt||amt<100)return setStatus("Minimum deposit is 100 sats.",true);var r=await fetch("/wallet/deposit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({amountSats:amt})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);var lnHtml=d.lightning_invoice?"<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;resize:none;' rows='2' readonly>"+esc(d.lightning_invoice)+"</textarea><button onclick='navigator.clipboard.writeText(document.querySelector(\"#deposit-qr textarea\").value)' style='margin-top:4px;padding:4px 10px;font-size:0.85em;'>Copy</button>":"";var chkHtml=d.checkout_url?"<br><a href='"+esc(d.checkout_url)+"' target='_blank' style='font-size:0.9em;'>Open in wallet</a>":"";document.getElementById("deposit-qr").innerHTML="<img src='"+esc(d.qr)+"' width='160' style='display:block;margin-bottom:6px;'>"+lnHtml+chkHtml;setStatus("Scan QR to deposit "+amt+" sats. Wallet updates automatically.",false);}
+    async function loadAdminStats(){if(role!=="admin")return;var r=await fetch("/admin/stats",{headers:authH()});if(!r.ok)return;var d=await r.json();var svc=d.top_services.map(function(s){return esc(s.service)+" ("+s.cnt+")";}).join(", ")||"—";var h="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;'>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Total Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#facc15;'>"+d.total_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Today</div><div style='font-size:1.4em;font-weight:bold;color:#4ade80;'>"+d.today_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Active Sessions</div><div style='font-size:1.4em;font-weight:bold;'>"+d.active_sessions+"</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>P2P Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#a5b4fc;'>"+d.p2p_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>SMS Sent</div><div style='font-size:1.4em;font-weight:bold;'>"+d.sms_sent+"</div></div>";h+="</div><p class='muted' style='font-size:0.85em;'>Top services: "+svc+"</p>";return h;}
     function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}if(name==="send"){renderSendTab();}}
-    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
+    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("wallet-bar").style.display="none";document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
     async function testSMS(){var n=prompt("Phone number (e.g. +46705536378):");if(!n)return;var t=prompt("SMS text (e.g. Your code is 123456):");if(!t)return;var r=await fetch("/test-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,text:t})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Test SMS injected! OTP: "+(d.otp||"none"),false);loadMessages();}
-    function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div><hr style='border-color:#333;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div>";loadAdminNums();loadAdminP2P();}
+    async function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";var statsHtml=await loadAdminStats()||"";box.innerHTML="<h3>Admin panel</h3>"+statsHtml+"<input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div><hr style='border-color:#333;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div>";loadAdminNums();loadAdminP2P();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; <strong>"+esc(i.price_sats)+" sats</strong> ["+(i.active?"active":"disabled")+"]</span><span style='display:flex;gap:6px;'><button onclick='editPrice("+i.id+","+i.price_sats+")' style='background:#6366f1;color:white;'>Edit price</button><button onclick='delNum("+i.id+")'>Disable</button></span></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
@@ -291,15 +310,16 @@ const HTML = `<!DOCTYPE html>
     function copyLightning(){if(!_lightningInvoice)return;navigator.clipboard.writeText(_lightningInvoice).then(function(){setStatus("Copied!",false);}).catch(function(){setStatus("Copy failed.",true);});}
     function clearQR(){document.getElementById("qr").innerHTML="";if(_pollTimer){clearInterval(_pollTimer);_pollTimer=null;}}
     function startPolling(){if(_pollTimer)clearInterval(_pollTimer);_pollTimer=setInterval(async function(){if(!token)return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();if(data.length){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});}},5000);}
-    async function buyNum(id){setStatus("Creating invoice...",false);var country=document.getElementById("selCountry")?document.getElementById("selCountry").value:"";var service=document.getElementById("selService")?document.getElementById("selService").value:"";var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id,country:country,service:service})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay. Waiting for confirmation...",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea id='lnTxt' style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;'>Open in Browser</a>":"";document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"<p class='muted' style='font-size:0.85em;margin-top:8px;'>Page auto-refreshes every 5 sec. After payment, scroll down to see your number.</p></div>";startPolling();}
-    async function loadSessions(){if(!token||role==="admin")return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="<h3>My active numbers</h3>";if(!data.length)h+="<p class='muted'>No active numbers yet.</p>";data.forEach(function(i){var tags="";if(i.country)tags+="<span style='background:#2a2a2a;border:1px solid #444;border-radius:6px;padding:2px 8px;font-size:0.8em;margin-right:6px;'>"+esc(i.country)+"</span>";if(i.service)tags+="<span style='background:#facc1522;border:1px solid #facc15;border-radius:6px;padding:2px 8px;font-size:0.8em;color:#facc15;'>"+esc(i.service)+"</span>";h+="<div class='box'><strong>"+esc(i.phone_number)+"</strong>"+(tags?" &nbsp;"+tags:"")+"<br><span class='muted' style='font-size:0.85em;'>active until "+esc(new Date(i.expires_at).toLocaleString())+"</span></div>";});document.getElementById("sessions").innerHTML=h;}
+    async function buyNum(id){setStatus("Creating invoice...",false);var country=document.getElementById("selCountry")?document.getElementById("selCountry").value:"";var service=document.getElementById("selService")?document.getElementById("selService").value:"";var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id,country:country,service:service})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);if(inv.paid_from_wallet){clearQR();setStatus("Paid from wallet! "+inv.amount_sats+" sats deducted. Number is active.",false);loadWalletBalance();loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});return;}setStatus("Scan QR to pay. Waiting for confirmation...",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea id='lnTxt' style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;'>Open in Browser</a>":"";document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"<p class='muted' style='font-size:0.85em;margin-top:8px;'>Page auto-refreshes every 5 sec. After payment, scroll down to see your number.</p></div>";startPolling();}
+    async function loadSessions(){if(!token||role==="admin")return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="<h3>My active numbers</h3>";if(!data.length)h+="<p class='muted'>No active numbers yet.</p>";data.forEach(function(i){var tags="";if(i.country)tags+="<span style='background:#2a2a2a;border:1px solid #444;border-radius:6px;padding:2px 8px;font-size:0.8em;margin-right:6px;'>"+esc(i.country)+"</span>";if(i.service)tags+="<span style='background:#facc1522;border:1px solid #facc15;border-radius:6px;padding:2px 8px;font-size:0.8em;color:#facc15;'>"+esc(i.service)+"</span>";var cd=countdown(i.expires_at);var cdColor=new Date(i.expires_at)-Date.now()<1800000?"#fca5a5":"#4ade80";h+="<div class='box'><strong>"+esc(i.phone_number)+"</strong>"+(tags?" &nbsp;"+tags:"")+"<br><span style='color:"+cdColor+";font-size:0.85em;'>&#9201; "+esc(cd)+"</span><span class='muted' style='font-size:0.82em;'> &mdash; "+esc(new Date(i.expires_at).toLocaleString())+"</span></div>";});document.getElementById("sessions").innerHTML=h;}
     async function loadMessages(){if(!token)return;var r=await fetch("/messages",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="<h3>OTP Inbox</h3>";if(!data.length)h+="<p class='muted'>No messages yet.</p>";data.forEach(function(i){h+="<div class='box'><span class='muted'>"+esc(i.phone_number)+"</span><br>"+esc(i.text)+(i.otp?" <strong style='color:#facc15;font-size:1.2em'>"+esc(i.otp)+"</strong>":"")+"<br><span class='muted' style='font-size:0.85em'>"+esc(new Date(i.created_at).toLocaleString())+"</span></div>";});document.getElementById("otp").innerHTML=h;}
-    function refreshAll(){renderAdmin();loadNumbers();loadSessions();loadMessages();}
+    function refreshAll(){renderAdmin();loadNumbers();loadSessions();loadMessages();loadWalletBalance();}
     var wsP=location.protocol==="https:"?"wss://":"ws://";
     var ws=new WebSocket(wsP+location.host);
     ws.onopen=function(){console.log("WS connected");};
-    ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==="session_activated"){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();loadMessages();setTimeout(function(){var el=document.getElementById("sessions");if(el)el.scrollIntoView({behavior:"smooth"});},300);}else if(m.type==="message"){loadMessages();}}catch(err){}};
+    ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==="session_activated"){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();loadMessages();loadWalletBalance();setTimeout(function(){var el=document.getElementById("sessions");if(el)el.scrollIntoView({behavior:"smooth"});},300);}else if(m.type==="message"){loadMessages();if(m.otp){showNotif("SMSNero: New OTP arrived","Code: "+m.otp);}}else if(m.type==="wallet_topped_up"){loadWalletBalance();setStatus("Wallet topped up!",false);document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";}else if(m.type==="send_credit_activated"){checkSendCredit();setStatus("Send credit activated!",false);}}catch(err){}};
     ws.onerror=function(){console.warn("WS error");};
+    setInterval(function(){if(token&&role!=="admin")loadSessions();},60000);
     if(token)refreshAll();
   </script>
 </body>
@@ -457,6 +477,24 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   const qr = await QRCode.toDataURL(qrSource);
   const country = String(req.body.country || "").trim().slice(0, 100) || null;
   const service = String(req.body.service || "").trim().slice(0, 100) || null;
+  // Try wallet payment first (only for regular number purchases)
+  if (!p2pListingId && !sendNumberId && !number._isSend) {
+    const wr = await pool.query("SELECT balance_sats FROM wallets WHERE user_id = $1", [req.user.id]);
+    const bal = wr.rows[0]?.balance_sats || 0;
+    if (bal >= number.price_sats) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("UPDATE wallets SET balance_sats = balance_sats - $1 WHERE user_id = $2", [number.price_sats, req.user.id]);
+        const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
+        await client.query("INSERT INTO sessions (user_id, number_id, expires_at, country, service) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING", [req.user.id, number.id, expiresAt, country, service]);
+        await client.query("COMMIT");
+        broadcast({ type: "session_activated", userId: req.user.id, numberId: number.id });
+        return res.json({ paid_from_wallet: true, amount_sats: number.price_sats, phone_number: number.phone_number });
+      } catch(e) { await client.query("ROLLBACK"); throw e; }
+      finally { client.release(); }
+    }
+  }
   const numIdForInvoice = number._isSend ? null : number.id;
   const result = await pool.query(
     "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, country, service, p2p_listing_id, send_number_id) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10) RETURNING *",
@@ -478,6 +516,11 @@ app.post("/webhook", wrap(async function(req, res) {
   if (!invoice) return res.sendStatus(404);
   if (status === "paid" || status === "settled" || status === "confirmed") {
     await pool.query("UPDATE invoices SET status = 'paid' WHERE id = $1", [invoice.id]);
+    if (invoice.is_deposit) {
+      await pool.query("INSERT INTO wallets (user_id, balance_sats) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance_sats = wallets.balance_sats + EXCLUDED.balance_sats", [invoice.user_id, invoice.amount_sats]);
+      broadcast({ type: "wallet_topped_up", userId: invoice.user_id, amount: invoice.amount_sats });
+      return res.sendStatus(200);
+    }
     if (invoice.send_number_id) {
       await pool.query("INSERT INTO send_credits (user_id, send_number_id, invoice_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.send_number_id, invoice.id]);
       broadcast({ type: "send_credit_activated", userId: invoice.user_id });
@@ -618,6 +661,45 @@ app.post("/admin/p2p/:id/payout", auth, adminOnly, wrap(async function(req, res)
   if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
   await pool.query("UPDATE p2p_listings SET owner_paid_sats = owner_paid_sats + $1 WHERE id = $2", [amount, id]);
   res.json({ ok: true });
+}));
+
+// WALLET: get balance
+app.get("/wallet/balance", auth, wrap(async function(req, res) {
+  const r = await pool.query("SELECT balance_sats FROM wallets WHERE user_id = $1", [req.user.id]);
+  res.json({ balance_sats: r.rows[0]?.balance_sats || 0 });
+}));
+
+// WALLET: deposit (create Lightning invoice)
+app.post("/wallet/deposit", auth, wrap(async function(req, res) {
+  if (req.user.role === "admin") return res.status(400).json({ error: "Admin cannot deposit to wallet" });
+  if (!SWISS_API_KEY || !SWISS_SECRET_KEY) return res.status(503).json({ error: "Payment not configured" });
+  const amount = Number(req.body.amountSats);
+  if (!Number.isInteger(amount) || amount < 100) return res.status(400).json({ error: "Minimum deposit is 100 sats" });
+  const appUrl = process.env.APP_URL || ("https://" + (process.env.RENDER_EXTERNAL_HOSTNAME || "smsnero.onrender.com"));
+  const payload = { title: "SMSNero Wallet", description: "Deposit " + amount + " sats", amount: amount, unit: "sat", onChain: false, delay: 10, webhook: { url: appUrl + "/webhook" } };
+  const response = await fetch(SWISS_API_URL + "/checkout", { method: "POST", headers: { "Content-Type": "application/json", "api-key": SWISS_API_KEY }, body: JSON.stringify(payload) });
+  const rawText = await response.text().catch(function() { return ""; });
+  let data = {}; try { data = JSON.parse(rawText); } catch(e) {}
+  if (!response.ok) return res.status(502).json({ error: "Payment error: " + (data.message || rawText.slice(0, 100)) });
+  const checkoutUrl = data.checkoutUrl || data.url || data.paymentUrl;
+  const lightningInvoice = data.pr || data.paymentRequest || null;
+  if (!checkoutUrl && !lightningInvoice) return res.status(502).json({ error: "No checkout URL returned" });
+  const qrSource = lightningInvoice || checkoutUrl;
+  const qr = await QRCode.toDataURL(qrSource);
+  const r = await pool.query("INSERT INTO invoices (provider_payment_id, user_id, amount_sats, status, checkout_url, qr, is_deposit) VALUES ($1, $2, $3, 'pending', $4, $5, TRUE) RETURNING id, amount_sats, checkout_url, qr", [data.id || null, req.user.id, amount, checkoutUrl || qrSource, qr]);
+  const row = r.rows[0]; row.lightning_invoice = lightningInvoice;
+  res.json(row);
+}));
+
+// ADMIN: stats dashboard
+app.get("/admin/stats", auth, adminOnly, wrap(async function(req, res) {
+  const rev = await pool.query("SELECT COALESCE(SUM(amount_sats),0) as total, COUNT(*) as count FROM invoices WHERE status='paid' AND is_deposit=FALSE AND send_number_id IS NULL");
+  const active = await pool.query("SELECT COUNT(*) as count FROM sessions WHERE expires_at > NOW()");
+  const p2p = await pool.query("SELECT COALESCE(SUM(amount_sats),0) as total, COUNT(*) as count FROM invoices WHERE status='paid' AND p2p_listing_id IS NOT NULL");
+  const sends = await pool.query("SELECT COUNT(*) as count FROM outbox WHERE status='sent'");
+  const services = await pool.query("SELECT service, COUNT(*) as cnt FROM sessions WHERE service IS NOT NULL GROUP BY service ORDER BY cnt DESC LIMIT 5");
+  const today = await pool.query("SELECT COALESCE(SUM(amount_sats),0) as total FROM invoices WHERE status='paid' AND is_deposit=FALSE AND created_at > NOW() - INTERVAL '24 hours'");
+  res.json({ total_revenue: Number(rev.rows[0].total), total_invoices: Number(rev.rows[0].count), active_sessions: Number(active.rows[0].count), p2p_revenue: Number(p2p.rows[0].total), p2p_count: Number(p2p.rows[0].count), sms_sent: Number(sends.rows[0].count), today_revenue: Number(today.rows[0].total), top_services: services.rows });
 }));
 
 // ADMIN: add a send number
