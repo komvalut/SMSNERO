@@ -137,6 +137,9 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS service TEXT`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS country TEXT`);
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service TEXT`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS p2p_listings (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, phone_number TEXT NOT NULL, price_sats INTEGER NOT NULL CHECK (price_sats > 0), description TEXT, active BOOLEAN NOT NULL DEFAULT TRUE, approved BOOLEAN NOT NULL DEFAULT FALSE, owner_earned_sats INTEGER NOT NULL DEFAULT 0, owner_paid_sats INTEGER NOT NULL DEFAULT 0, number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS p2p_listing_id BIGINT REFERENCES p2p_listings(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE p2p_listings ADD COLUMN IF NOT EXISTS number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL`);
   console.log("Database initialized.");
 }
 
@@ -151,12 +154,16 @@ const HTML = `<!DOCTYPE html>
     main{max-width:950px;margin:auto;padding:28px}
     .box{padding:16px;margin:14px 0;background:#1e1e1e;border-radius:12px;border:1px solid #333}
     button{background:#facc15;border:none;padding:10px 14px;cursor:pointer;margin:5px;font-weight:bold;border-radius:8px;color:#111}
-    input{padding:10px;margin:5px;border-radius:8px;border:1px solid #444;background:#151515;color:white}
+    input,textarea,select{padding:10px;margin:5px;border-radius:8px;border:1px solid #444;background:#151515;color:white}
     a{color:#facc15}
     img{background:white;padding:8px;border-radius:10px}
     .error{color:#fca5a5}
     .muted{color:#aaa}
     .row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .tabs{display:flex;gap:0;margin:18px 0 0 0;border-bottom:2px solid #333}
+    .tab{background:none;border:none;color:#aaa;padding:10px 22px;font-size:1em;font-weight:bold;border-radius:10px 10px 0 0;cursor:pointer;margin:0}
+    .tab.active{background:#1e1e1e;color:#facc15;border:2px solid #333;border-bottom:2px solid #1e1e1e}
+    .badge{background:#facc15;color:#111;border-radius:10px;padding:1px 7px;font-size:0.78em;margin-left:5px}
   </style>
 </head>
 <body>
@@ -171,27 +178,57 @@ const HTML = `<!DOCTYPE html>
       <div id="status" class="muted"></div>
     </div>
     <div id="admin" class="box" style="display:none"></div>
-    <div id="qr"></div>
-    <div id="numbers" class="box">Login or register to load numbers.</div>
-    <div id="sessions" class="box"><h3>My active numbers</h3></div>
-    <div id="otp" class="box"><h3>OTP Inbox</h3></div>
+    <div class="tabs">
+      <button class="tab active" id="tab-btn-rent" onclick="switchTab('rent')">Rent</button>
+      <button class="tab" id="tab-btn-p2p" onclick="switchTab('p2p')">P2P Market</button>
+      <button class="tab" id="tab-btn-send" onclick="switchTab('send')">Send SMS</button>
+    </div>
+    <div id="tab-rent">
+      <div id="qr"></div>
+      <div id="numbers" class="box">Login or register to load numbers.</div>
+      <div id="sessions" class="box"><h3>My active numbers</h3></div>
+      <div id="otp" class="box"><h3>OTP Inbox</h3></div>
+    </div>
+    <div id="tab-p2p" style="display:none">
+      <div class="box"><h3>P2P Market</h3><p class="muted">Numbers listed by the community. Pay via Bitcoin Lightning. Platform takes 50% commission.</p><div id="p2p-market"><p class="muted">Login to view marketplace.</p></div></div>
+      <div class="box" id="p2p-submit-box" style="display:none"><h3>List your number</h3><input id="p2p-phone" placeholder="+46700000001" style="width:180px"><input id="p2p-price" type="number" min="1" placeholder="Price in sats" style="width:150px"><input id="p2p-desc" placeholder="Description (optional)" style="width:220px"><br><button onclick="submitP2P()">Submit for approval</button><p class="muted" style="font-size:0.85em;margin-top:8px;">Your earnings (50%) are tracked and paid out by the admin.</p></div>
+      <div id="p2p-my-listings"></div>
+    </div>
+    <div id="tab-send" style="display:none">
+      <div class="box" style="text-align:center;padding:40px">
+        <h3>Send SMS</h3>
+        <p class="muted">Coming soon &mdash; requires an outbound SMS gateway (e.g. Twilio).</p>
+        <p class="muted" style="font-size:0.85em;">Contact admin to enable this feature.</p>
+      </div>
+    </div>
   </main>
   <script>
     var token=localStorage.getItem("smsnero_token")||"";
     var role=localStorage.getItem("smsnero_role")||"";
+    var _activeTab="rent";
     function esc(v){return String(v).replace(/[&<>'"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]});}
     function setStatus(msg,err){var el=document.getElementById("status");el.className=err?"error":"muted";el.textContent=msg;}
     function authH(ex){return Object.assign({},ex||{},{Authorization:"Bearer "+token});}
     function saveSession(d){token=d.token;role=d.user.role;localStorage.setItem("smsnero_token",token);localStorage.setItem("smsnero_role",role);}
-    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";}
+    function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}}
+    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
     async function testSMS(){var n=prompt("Phone number (e.g. +46705536378):");if(!n)return;var t=prompt("SMS text (e.g. Your code is 123456):");if(!t)return;var r=await fetch("/test-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,text:t})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Test SMS injected! OTP: "+(d.otp||"none"),false);loadMessages();}
-    function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div>";loadAdminNums();}
+    function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";box.innerHTML="<h3>Admin panel</h3><input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>Add number</button> <button onclick='testSMS()' style='background:#6366f1;color:white;'>Test SMS inject</button><div id='adminList'></div><hr style='border-color:#333;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div>";loadAdminNums();loadAdminP2P();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; <strong>"+esc(i.price_sats)+" sats</strong> ["+(i.active?"active":"disabled")+"]</span><span style='display:flex;gap:6px;'><button onclick='editPrice("+i.id+","+i.price_sats+")' style='background:#6366f1;color:white;'>Edit price</button><button onclick='delNum("+i.id+")'>Disable</button></span></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
     async function editPrice(id,current){var p=prompt("New price in sats (current: "+current+"):");if(!p)return;var n=Number(p);if(!Number.isInteger(n)||n<=0)return setStatus("Invalid price.",true);var r=await fetch("/admin/numbers/"+id+"/price",{method:"PUT",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({priceSats:n})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Price updated to "+n+" sats.",false);loadAdminNums();loadNumbers();}
+    async function loadAdminP2P(){if(role!=="admin")return;var r=await fetch("/admin/p2p",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){var earned=i.owner_earned_sats||0;var paid=i.owner_paid_sats||0;var owed=earned-paid;h+="<div class='box'><div class='row'><span><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats &mdash; <span style='color:"+(i.approved?"#4ade80":"#fca5a5")+"'>"+(i.approved?"Approved":"Pending")+"</span></span><span style='display:flex;gap:6px;'>"+(i.approved?"":"<button onclick='approveP2P("+i.id+")' style='background:#4ade80;color:#111;'>Approve</button>")+"<button onclick='deleteP2P("+i.id+")' style='background:#ef4444;color:white;'>Remove</button></span></div><div style='margin-top:8px;font-size:0.85em;'><span class='muted'>Owner earned: </span><strong>"+earned+" sats</strong> &nbsp;|&nbsp; <span class='muted'>Paid out: </span><strong>"+paid+" sats</strong> &nbsp;|&nbsp; <span style='color:"+(owed>0?"#facc15":"#4ade80")+"'>Owed: "+owed+" sats</span>"+((owed>0)?"&nbsp;<button onclick='payoutP2P("+i.id+","+owed+")' style='background:#facc15;color:#111;padding:4px 10px;font-size:0.85em;'>Mark paid</button>":"")+"</div></div>";});document.getElementById("adminP2PList").innerHTML=h||"<p class='muted'>No P2P listings yet.</p>";}
+    async function approveP2P(id){var r=await fetch("/admin/p2p/"+id+"/approve",{method:"PUT",headers:authH()});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Listing approved.",false);loadAdminP2P();loadP2PMarket();}
+    async function deleteP2P(id){if(!confirm("Remove this P2P listing?"))return;var r=await fetch("/admin/p2p/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Listing removed.",false);loadAdminP2P();loadP2PMarket();}
+    async function payoutP2P(id,amount){if(!confirm("Mark "+amount+" sats as paid out to this owner?"))return;var r=await fetch("/admin/p2p/"+id+"/payout",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({amount:amount})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Payout of "+amount+" sats marked.",false);loadAdminP2P();}
+    async function submitP2P(){var phone=document.getElementById("p2p-phone").value.trim();var price=Number(document.getElementById("p2p-price").value);var desc=document.getElementById("p2p-desc").value.trim();if(!phone||!price)return setStatus("Enter phone number and price.",true);var r=await fetch("/p2p/submit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({phoneNumber:phone,priceSats:price,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Listing submitted! Waiting for admin approval.",false);document.getElementById("p2p-phone").value="";document.getElementById("p2p-price").value="";document.getElementById("p2p-desc").value="";loadMyP2PListings();}
+    async function loadP2PMarket(){if(!token)return;var r=await fetch("/p2p/market",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No listings in the marketplace yet. Be the first to list your number!</p>";data.forEach(function(i){h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='buyP2P("+i.id+")'>Buy</button></div>";});document.getElementById("p2p-market").innerHTML=h;}
+    async function loadMyP2PListings(){if(!token)return;var r=await fetch("/p2p/my-listings",{headers:authH()});if(!r.ok)return;var data=await r.json();if(!data.length){document.getElementById("p2p-my-listings").innerHTML="";document.getElementById("p2p-submit-box").style.display="block";return;}document.getElementById("p2p-submit-box").style.display="block";var h="<div class='box'><h4>My listings</h4>";data.forEach(function(i){var earned=i.owner_earned_sats||0;var paid=i.owner_paid_sats||0;h+="<div class='box' style='margin:8px 0;'><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats &mdash; <span style='color:"+(i.approved?"#4ade80":"#fca5a5")+"'>"+(i.approved?"Active":"Pending approval")+"</span><br><span class='muted' style='font-size:0.85em;'>Earned: "+earned+" sats | Paid out: "+paid+" sats | Owed: "+(earned-paid)+" sats</span></div>";});h+="</div>";document.getElementById("p2p-my-listings").innerHTML=h;}
+    var _p2pData={};
+    async function buyP2P(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({p2pListingId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open in Browser</a>":"";switchTab("rent");document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR (P2P)</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"</div>";startPolling();}
     var COUNTRIES=["Sweden","USA","UK","Germany","France","Netherlands","Poland","Spain","Italy","Romania","Ukraine","Russia","Turkey","Brazil","India","Canada","Australia","Belgium","Czech Republic","Hungary","Portugal","Finland","Norway","Denmark","Switzerland","Austria","Greece","Serbia","Croatia","Bosnia","Slovenia","Slovakia","Bulgaria","Estonia","Latvia","Lithuania","Other"];
     var SERVICES=["Telegram","WhatsApp","Viber","Signal","Instagram","Facebook","Twitter / X","TikTok","Snapchat","Google","Apple","Microsoft","Amazon","Netflix","Uber","Airbnb","LinkedIn","Discord","Tinder","Bumble","Other"];
     var _numsData={};
@@ -309,15 +346,30 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   if (!SWISS_API_KEY || !SWISS_SECRET_KEY) {
     return res.status(503).json({ error: "Payment not configured. Set SWISS_API_KEY and SWISS_SECRET_KEY." });
   }
-  const numberId = Number(req.body.numberId);
-  if (!Number.isInteger(numberId) || numberId <= 0) return res.status(400).json({ error: "Invalid number ID" });
-  const numberResult = await pool.query("SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE", [numberId]);
-  const number = numberResult.rows[0];
-  if (!number) return res.status(400).json({ error: "Number not available" });
+  let number, p2pListingId = null;
+  if (req.body.p2pListingId) {
+    const lid = Number(req.body.p2pListingId);
+    if (!Number.isInteger(lid) || lid <= 0) return res.status(400).json({ error: "Invalid P2P listing ID" });
+    const lr = await pool.query("SELECT * FROM p2p_listings WHERE id = $1 AND approved = TRUE AND active = TRUE", [lid]);
+    const listing = lr.rows[0];
+    if (!listing) return res.status(400).json({ error: "P2P listing not available" });
+    if (!listing.number_id) return res.status(400).json({ error: "P2P listing not linked to a number yet" });
+    const nr = await pool.query("SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE", [listing.number_id]);
+    if (!nr.rows[0]) return res.status(400).json({ error: "P2P number not available" });
+    number = nr.rows[0];
+    number.price_sats = listing.price_sats;
+    p2pListingId = lid;
+  } else {
+    const numberId = Number(req.body.numberId);
+    if (!Number.isInteger(numberId) || numberId <= 0) return res.status(400).json({ error: "Invalid number ID" });
+    const numberResult = await pool.query("SELECT id, phone_number, price_sats FROM numbers WHERE id = $1 AND active = TRUE", [numberId]);
+    number = numberResult.rows[0];
+    if (!number) return res.status(400).json({ error: "Number not available" });
+  }
   const appUrl = process.env.APP_URL || ("https://" + (process.env.RENDER_EXTERNAL_HOSTNAME || "smsnero.onrender.com"));
   const payload = {
     title: "SMSNero",
-    description: "Phone number: " + number.phone_number,
+    description: (p2pListingId ? "[P2P] " : "") + "Phone number: " + number.phone_number,
     amount: number.price_sats,
     unit: "sat",
     onChain: false,
@@ -347,8 +399,8 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   const country = String(req.body.country || "").trim().slice(0, 100) || null;
   const service = String(req.body.service || "").trim().slice(0, 100) || null;
   const result = await pool.query(
-    "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, country, service) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8) RETURNING *",
-    [data.id || null, req.user.id, number.id, number.price_sats, checkoutUrl || qrSource, qr, country, service]
+    "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, country, service, p2p_listing_id) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9) RETURNING *",
+    [data.id || null, req.user.id, number.id, number.price_sats, checkoutUrl || qrSource, qr, country, service, p2pListingId]
   );
   const row = result.rows[0];
   row.lightning_invoice = lightningInvoice;
@@ -368,6 +420,10 @@ app.post("/webhook", wrap(async function(req, res) {
     await pool.query("UPDATE invoices SET status = 'paid' WHERE id = $1", [invoice.id]);
     const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
     await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.number_id, invoice.id, expiresAt, invoice.country || null, invoice.service || null]);
+    if (invoice.p2p_listing_id) {
+      const ownerShare = Math.floor(invoice.amount_sats * 0.5);
+      await pool.query("UPDATE p2p_listings SET owner_earned_sats = owner_earned_sats + $1 WHERE id = $2", [ownerShare, invoice.p2p_listing_id]);
+    }
     broadcast({ type: "session_activated", userId: invoice.user_id, numberId: invoice.number_id });
     return res.sendStatus(200);
   }
@@ -421,6 +477,82 @@ app.post("/sms-webhook", wrap(async function(req, res) {
   await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, sender, text, otp]);
   broadcast({ type: "message", phoneNumber: sender, text: text, otp: otp });
   return res.sendStatus(200);
+}));
+
+// P2P: submit a listing
+app.post("/p2p/submit", auth, wrap(async function(req, res) {
+  if (req.user.role === "admin") return res.status(400).json({ error: "Admin cannot submit P2P listings" });
+  const phone = String(req.body.phoneNumber || "").trim();
+  const price = Number(req.body.priceSats);
+  const desc = String(req.body.description || "").trim().slice(0, 300) || null;
+  if (!phone || !phone.startsWith("+")) return res.status(400).json({ error: "Phone number must start with +" });
+  if (!Number.isInteger(price) || price <= 0) return res.status(400).json({ error: "Price must be a positive integer in sats" });
+  const r = await pool.query(
+    "INSERT INTO p2p_listings (user_id, phone_number, price_sats, description) VALUES ($1, $2, $3, $4) RETURNING id",
+    [req.user.id, phone, price, desc]
+  );
+  res.json({ ok: true, id: r.rows[0].id });
+}));
+
+// P2P: get marketplace (approved & active listings, not owned by self)
+app.get("/p2p/market", auth, wrap(async function(req, res) {
+  const r = await pool.query(
+    "SELECT id, phone_number, price_sats, description FROM p2p_listings WHERE approved = TRUE AND active = TRUE AND user_id <> $1 ORDER BY created_at DESC",
+    [req.user.id]
+  );
+  res.json(r.rows);
+}));
+
+// P2P: get own listings with earnings
+app.get("/p2p/my-listings", auth, wrap(async function(req, res) {
+  const r = await pool.query(
+    "SELECT id, phone_number, price_sats, description, approved, active, owner_earned_sats, owner_paid_sats FROM p2p_listings WHERE user_id = $1 ORDER BY created_at DESC",
+    [req.user.id]
+  );
+  res.json(r.rows);
+}));
+
+// ADMIN: view all P2P listings
+app.get("/admin/p2p", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query(
+    "SELECT p.*, u.username FROM p2p_listings p LEFT JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC"
+  );
+  res.json(r.rows);
+}));
+
+// ADMIN: approve a P2P listing (adds number to numbers table)
+app.put("/admin/p2p/:id/approve", auth, adminOnly, wrap(async function(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
+  const lr = await pool.query("SELECT * FROM p2p_listings WHERE id = $1", [id]);
+  const listing = lr.rows[0];
+  if (!listing) return res.status(404).json({ error: "Listing not found" });
+  // Upsert the number into the numbers table
+  const nr = await pool.query(
+    "INSERT INTO numbers (phone_number, price_sats) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET active = TRUE, price_sats = EXCLUDED.price_sats RETURNING id",
+    [listing.phone_number, listing.price_sats]
+  );
+  const numberId = nr.rows[0].id;
+  await pool.query("UPDATE p2p_listings SET approved = TRUE, active = TRUE, number_id = $1 WHERE id = $2", [numberId, id]);
+  res.json({ ok: true });
+}));
+
+// ADMIN: remove/deactivate a P2P listing
+app.delete("/admin/p2p/:id", auth, adminOnly, wrap(async function(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
+  await pool.query("UPDATE p2p_listings SET active = FALSE WHERE id = $1", [id]);
+  res.json({ ok: true });
+}));
+
+// ADMIN: mark a payout as done
+app.post("/admin/p2p/:id/payout", auth, adminOnly, wrap(async function(req, res) {
+  const id = Number(req.params.id);
+  const amount = Number(req.body.amount);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
+  if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+  await pool.query("UPDATE p2p_listings SET owner_paid_sats = owner_paid_sats + $1 WHERE id = $2", [amount, id]);
+  res.json({ ok: true });
 }));
 
 wss.on("connection", function(socket) {
