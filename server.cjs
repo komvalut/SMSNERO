@@ -244,14 +244,14 @@ app.get("/my-numbers", auth, wrap(async function(req, res) {
 
 app.get("/messages", auth, wrap(async function(req, res) {
   if (req.user.role === "admin") {
-    const result = await pool.query("SELECT id, phone_number, text, otp, created_at FROM messages WHERE phone_number NOT LIKE '\\%%' ORDER BY created_at DESC LIMIT 200");
+    const result = await pool.query("SELECT id, phone_number, text, otp, created_at FROM messages WHERE phone_number NOT LIKE '\\%%' AND phone_number NOT LIKE '[%' ORDER BY created_at DESC LIMIT 200");
     return res.json(result.rows);
   }
   const sessResult = await pool.query("SELECT number_id FROM sessions WHERE user_id = $1 AND expires_at > NOW() ORDER BY created_at DESC", [req.user.id]);
   if (!sessResult.rows.length) return res.json([]);
   const ids = sessResult.rows.map(function(r) { return r.number_id; });
   const result = await pool.query(
-    "SELECT id, phone_number, text, otp, created_at FROM messages WHERE number_id = ANY($1) AND phone_number NOT LIKE '\\%%' ORDER BY created_at DESC LIMIT 200",
+    "SELECT id, phone_number, text, otp, created_at FROM messages WHERE number_id = ANY($1) AND phone_number NOT LIKE '\\%%' AND phone_number NOT LIKE '[%' ORDER BY created_at DESC LIMIT 200",
     [ids]
   );
   res.json(result.rows);
