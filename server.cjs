@@ -6,6 +6,7 @@ const crypto = require("crypto");
 const QRCode = require("qrcode");
 const { Pool } = require("pg");
 const { WebSocketServer, WebSocket } = require("ws");
+const https = require("https");
 
 const app = express();
 const server = http.createServer(app);
@@ -149,7 +150,39 @@ async function initDb() {
   await pool.query(`ALTER TABLE invoices ALTER COLUMN number_id DROP NOT NULL`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS is_deposit BOOLEAN NOT NULL DEFAULT FALSE`);
   await pool.query(`CREATE TABLE IF NOT EXISTS wallets (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, balance_sats INTEGER NOT NULL DEFAULT 0)`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS referral_codes (id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, bonus_sats INTEGER NOT NULL DEFAULT 500, description TEXT, max_uses INTEGER NOT NULL DEFAULT 1000, uses_count INTEGER NOT NULL DEFAULT 0, is_active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS user_referrals (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, referral_code_id INTEGER NOT NULL REFERENCES referral_codes(id) ON DELETE CASCADE, used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(user_id, referral_code_id))`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS announcements (id SERIAL PRIMARY KEY, title TEXT NOT NULL, body TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS promo_ads (id SERIAL PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, description TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, sort_order INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   console.log("Database initialized.");
+}
+
+let _newsCache = null;
+let _newsCacheAt = 0;
+const NEWS_TTL = 15 * 60 * 1000;
+function fetchNews() {
+  if (_newsCache && Date.now() - _newsCacheAt < NEWS_TTL) return Promise.resolve(_newsCache);
+  return new Promise(function(resolve) {
+    const req = https.get("https://cointelegraph.com/rss", function(resp) {
+      let data = "";
+      resp.on("data", function(c) { data += c; });
+      resp.on("end", function() {
+        const items = [];
+        const re = /<item>[\s\S]*?<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>[\s\S]*?<link[^>]*>\s*([^\s<][^<]*)<\/link>/g;
+        let m;
+        while ((m = re.exec(data)) !== null && items.length < 8) {
+          const title = m[1].replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").trim();
+          const link = m[2].trim();
+          if (title && link) items.push({ title, link });
+        }
+        _newsCache = items;
+        _newsCacheAt = Date.now();
+        resolve(items);
+      });
+    });
+    req.on("error", function() { resolve(_newsCache || []); });
+    req.setTimeout(6000, function() { req.destroy(); resolve(_newsCache || []); });
+  });
 }
 
 const HTML = `<!DOCTYPE html>
@@ -212,6 +245,11 @@ const HTML = `<!DOCTYPE html>
           <div id="deposit-qr" style="margin-top:10px;"></div>
         </div>
       </div>
+      <div id="referral-bar" style="display:none;width:100%;margin-top:10px;padding-top:10px;border-top:1px solid #1e2d40;">
+        <span class="muted" style="font-size:0.85em;">&#127381; Referral code:</span>
+        <input id="ref-code" placeholder="Enter code" style="width:130px;font-size:0.88em;padding:6px 10px;">
+        <button onclick="useReferral()" style="padding:6px 14px;font-size:0.88em;">Apply</button>
+      </div>
     </div>
     <div id="admin" class="box" style="display:none"></div>
     <div class="tabs">
@@ -270,6 +308,9 @@ const HTML = `<!DOCTYPE html>
         <div class="box" id="my-sent-box" style="display:none"><h3>My sent messages</h3><div id="my-sent-list"></div></div>
       </div>
     </div>
+    <div id="announcements-box" class="box" style="display:none;margin-top:18px;"></div>
+    <div id="promo-ads-box" class="box" style="display:none;margin-top:12px;"></div>
+    <div id="news-box" class="box" style="margin-top:12px;"><p class="muted" style="font-size:0.9em;">Loading crypto news...</p></div>
   </main>
   <script>
     var token=localStorage.getItem("smsnero_token")||"";
@@ -282,7 +323,11 @@ const HTML = `<!DOCTYPE html>
     function requestNotifPerm(){if(typeof Notification!=="undefined"&&Notification.permission==="default")Notification.requestPermission();}
     function showNotif(title,body){if(typeof Notification!=="undefined"&&Notification.permission==="granted"){try{new Notification(title,{body:body});}catch(e){}}}
     function countdown(expiresAt){var ms=new Date(expiresAt)-Date.now();if(ms<=0)return"Expired";var h=Math.floor(ms/3600000);var m=Math.floor((ms%3600000)/60000);return h>0?h+"h "+m+"m left":m+"m left";}
-    async function loadWalletBalance(){var bar=document.getElementById("wallet-bar");if(!token||role==="admin"){bar.style.display="none";return;}var r=await fetch("/wallet/balance",{headers:authH()});if(!r.ok)return;var d=await r.json();document.getElementById("wallet-bal").textContent=d.balance_sats;bar.style.display="flex";}
+    async function loadWalletBalance(){var bar=document.getElementById("wallet-bar");var refBar=document.getElementById("referral-bar");if(!token||role==="admin"){bar.style.display="none";if(refBar)refBar.style.display="none";return;}var r=await fetch("/wallet/balance",{headers:authH()});if(!r.ok)return;var d=await r.json();document.getElementById("wallet-bal").textContent=d.balance_sats;bar.style.display="flex";if(refBar)refBar.style.display="block";}
+    async function useReferral(){var code=document.getElementById("ref-code").value.trim();if(!code)return setStatus("Enter a referral code.",true);var r=await fetch("/use-referral",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({code:code})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Invalid code.",true);setStatus("Code applied! "+d.bonus_sats+" sats added to your wallet.",false);document.getElementById("ref-code").value="";loadWalletBalance();}
+    async function loadAnnouncements(){var r=await fetch("/public/announcements");if(!r.ok)return;var data=await r.json();var box=document.getElementById("announcements-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="<h3>&#128226; Announcements</h3>";data.forEach(function(i){h+="<div style='padding:10px 0;border-bottom:1px solid #1e2d40;'><strong>"+esc(i.title)+"</strong>"+(i.body?"<br><span class='muted' style='font-size:0.9em;'>"+esc(i.body)+"</span>":"")+"</div>";});box.innerHTML=h;}
+    async function loadPromoAds(){var r=await fetch("/public/promo-ads");if(!r.ok)return;var data=await r.json();var box=document.getElementById("promo-ads-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="<h3>&#127381; Sponsored</h3><div style='display:flex;flex-wrap:wrap;gap:10px;'>";data.forEach(function(i){h+="<a href='"+esc(i.url)+"' target='_blank' rel='noopener' style='display:block;background:#1a1500;border:1px solid #fbbf24;border-radius:12px;padding:12px 16px;color:#fbbf24;text-decoration:none;flex:1;min-width:180px;'><strong>"+esc(i.title)+"</strong>"+(i.description?"<br><span style='color:#94a3b8;font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</a>";});h+="</div>";box.innerHTML=h;}
+    async function loadCryptoNews(){var r=await fetch("/public/news");if(!r.ok)return;var data=await r.json();var box=document.getElementById("news-box");if(!data||!data.length){box.innerHTML="<p class='muted' style='font-size:0.85em;'>Could not load news.</p>";return;}var h="<h3>&#128240; Bitcoin &amp; Crypto News</h3>";data.forEach(function(i){h+="<div style='padding:8px 0;border-bottom:1px solid #1e2d40;'><a href='"+esc(i.link)+"' target='_blank' rel='noopener' style='color:#e2e8f0;text-decoration:none;font-size:0.9em;'>"+esc(i.title)+"</a></div>";});h+="<div style='margin-top:8px;'><span class='muted' style='font-size:0.78em;'>Source: CoinTelegraph &mdash; updates every 15 min</span></div>";box.innerHTML=h;}
     function showDepositForm(){var f=document.getElementById("deposit-form");f.style.display=f.style.display==="none"?"block":"none";}
     function cancelDeposit(){document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";}
     var _depositInvoice="";
@@ -290,11 +335,23 @@ const HTML = `<!DOCTYPE html>
     async function doDeposit(){var amt=Number(document.getElementById("dep-amount").value);if(!amt||amt<100)return setStatus("Minimum deposit is 100 sats.",true);var r=await fetch("/wallet/deposit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({amountSats:amt})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);_depositInvoice=d.lightning_invoice||"";var lnHtml=_depositInvoice?"<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;resize:none;margin-top:6px;' rows='2' readonly>"+esc(_depositInvoice)+"</textarea><br><button onclick='copyDepositInvoice()' style='margin-top:4px;padding:4px 10px;font-size:0.85em;'>Copy Invoice</button>":"";var chkHtml=d.checkout_url?"<br><a href='"+esc(d.checkout_url)+"' target='_blank' style='font-size:0.9em;'>Open in wallet</a>":"";document.getElementById("deposit-qr").innerHTML="<img src='"+esc(d.qr)+"' width='160' style='display:block;margin-bottom:6px;'>"+lnHtml+chkHtml;setStatus("Scan QR to deposit "+amt+" sats. Wallet updates automatically.",false);}
     async function loadAdminStats(){if(role!=="admin")return;var r=await fetch("/admin/stats",{headers:authH()});if(!r.ok)return;var d=await r.json();var svc=d.top_services.map(function(s){return esc(s.service)+" ("+s.cnt+")";}).join(", ")||"—";var h="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;'>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Total Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#facc15;'>"+d.total_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Today</div><div style='font-size:1.4em;font-weight:bold;color:#4ade80;'>"+d.today_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Active Sessions</div><div style='font-size:1.4em;font-weight:bold;'>"+d.active_sessions+"</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>P2P Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#a5b4fc;'>"+d.p2p_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>SMS Sent</div><div style='font-size:1.4em;font-weight:bold;'>"+d.sms_sent+"</div></div>";h+="</div><p class='muted' style='font-size:0.85em;'>Top services: "+svc+"</p>";return h;}
     function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}if(name==="send"){renderSendTab();}}
-    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("wallet-bar").style.display="none";document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
+    function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("wallet-bar").style.display="none";document.getElementById("referral-bar").style.display="none";document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
     async function testSMS(){var n=prompt("Phone number (e.g. +46705536378):");if(!n)return;var t=prompt("SMS text (e.g. Your code is 123456):");if(!t)return;var r=await fetch("/test-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,text:t})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Test SMS injected! OTP: "+(d.otp||"none"),false);loadMessages();}
-    async function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";var statsHtml=await loadAdminStats()||"";box.innerHTML="<h3>&#9889; Admin panel</h3>"+statsHtml+"<input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>&#9889; Add number</button> <button onclick='testSMS()' class='btn-secondary'>Test SMS</button><div id='adminList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div>";loadAdminNums();loadAdminP2P();}
+    async function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";var statsHtml=await loadAdminStats()||"";box.innerHTML="<h3>&#9889; Admin panel</h3>"+statsHtml+"<input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>&#9889; Add number</button> <button onclick='testSMS()' class='btn-secondary'>Test SMS</button><div id='adminList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Referral Codes</h4><div id='adminRefCodes'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#128226; Announcements</h4><div id='adminAnnouncements'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Promo Ads (Affiliate Links)</h4><p class='muted' style='font-size:0.85em;'>Your Binance, Nexo, and other referral links shown as banners to all users.</p><div id='adminPromoAds'></div>";loadAdminNums();loadAdminP2P();loadAdminRefCodes();loadAdminAnnouncements();loadAdminPromoAds();}
+    var _refCodesData={};
+    async function loadAdminRefCodes(){if(role!=="admin")return;var r=await fetch("/admin/referral-codes",{headers:authH()});if(!r.ok)return;var data=await r.json();_refCodesData={};var h="<div style='display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;'><input id='rc-code' placeholder='Code (e.g. SUMMER25)' style='width:150px'><input id='rc-sats' type='number' placeholder='Bonus sats' style='width:120px'><input id='rc-desc' placeholder='Description' style='width:180px'><button onclick='addRefCode()'>&#9889; Add Code</button></div>";data.forEach(function(i){_refCodesData[i.id]=i;h+="<div class='box row'><span><strong style='color:#fbbf24;'>"+esc(i.code)+"</strong> &mdash; <span class='ln-yellow'>+"+esc(i.bonus_sats)+" sats</span> &mdash; used "+esc(i.uses_count)+"/"+esc(i.max_uses)+" &mdash; <span style='color:"+(i.is_active?"#4ade80":"#fc8181")+"'>"+(i.is_active?"active":"disabled")+"</span>"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='deleteRefCode("+i.id+")' class='btn-danger' style='padding:6px 12px;'>Disable</button></div>";});document.getElementById("adminRefCodes").innerHTML=h||"<p class='muted'>No referral codes yet.</p>";}
+    async function addRefCode(){var code=document.getElementById("rc-code").value.trim().toUpperCase();var sats=Number(document.getElementById("rc-sats").value);var desc=document.getElementById("rc-desc").value.trim();if(!code||!sats)return setStatus("Enter code and bonus sats.",true);var r=await fetch("/admin/referral-codes",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({code:code,bonusSats:sats,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Referral code created: "+code,false);document.getElementById("rc-code").value="";document.getElementById("rc-sats").value="";document.getElementById("rc-desc").value="";loadAdminRefCodes();}
+    async function deleteRefCode(id){if(!confirm("Disable this referral code?"))return;var r=await fetch("/admin/referral-codes/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Code disabled.",false);loadAdminRefCodes();}
+    var _announcementsData={};
+    async function loadAdminAnnouncements(){if(role!=="admin")return;var r=await fetch("/admin/announcements",{headers:authH()});if(!r.ok)return;var data=await r.json();_announcementsData={};var h="<div style='display:flex;flex-direction:column;gap:6px;margin-bottom:10px;'><input id='ann-title' placeholder='Title' style='width:100%;'><textarea id='ann-body' placeholder='Body text (optional)' rows='2' style='width:100%;resize:vertical;'></textarea><button onclick='addAnnouncement()' style='width:fit-content;'>&#128226; Post Announcement</button></div>";data.forEach(function(i){_announcementsData[i.id]=i;h+="<div class='box row'><span><strong>"+esc(i.title)+"</strong>"+(i.body?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.body)+"</span>":"")+"<br><span class='muted' style='font-size:0.8em;'>"+esc(new Date(i.created_at).toLocaleString())+"</span></span><button onclick='deleteAnnouncement("+i.id+")' class='btn-danger' style='padding:6px 12px;'>Delete</button></div>";});document.getElementById("adminAnnouncements").innerHTML=h||"<p class='muted'>No announcements.</p>";}
+    async function addAnnouncement(){var title=document.getElementById("ann-title").value.trim();var body=document.getElementById("ann-body").value.trim();if(!title)return setStatus("Enter a title.",true);var r=await fetch("/admin/announcements",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({title:title,body:body})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Announcement posted.",false);document.getElementById("ann-title").value="";document.getElementById("ann-body").value="";loadAdminAnnouncements();loadAnnouncements();}
+    async function deleteAnnouncement(id){if(!confirm("Delete this announcement?"))return;var r=await fetch("/admin/announcements/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Deleted.",false);loadAdminAnnouncements();loadAnnouncements();}
+    var _promoAdsData={};
+    async function loadAdminPromoAds(){if(role!=="admin")return;var r=await fetch("/admin/promo-ads",{headers:authH()});if(!r.ok)return;var data=await r.json();_promoAdsData={};var h="<div style='display:flex;flex-direction:column;gap:6px;margin-bottom:10px;'><input id='pa-title' placeholder='Title (e.g. Binance - Best Exchange)' style='width:100%;'><input id='pa-url' placeholder='Your referral URL (https://...)' style='width:100%;'><input id='pa-desc' placeholder='Short description (optional)' style='width:100%;'><button onclick='addPromoAd()' style='width:fit-content;'>&#127381; Add Ad</button></div>";data.forEach(function(i){_promoAdsData[i.id]=i;h+="<div class='box row'><span><strong>"+esc(i.title)+"</strong><br><a href='"+esc(i.url)+"' target='_blank' style='font-size:0.85em;color:#ff8040;word-break:break-all;'>"+esc(i.url.length>55?i.url.slice(0,55)+"...":i.url)+"</a>"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='deletePromoAd("+i.id+")' class='btn-danger' style='padding:6px 12px;flex-shrink:0;'>Remove</button></div>";});document.getElementById("adminPromoAds").innerHTML=h||"<p class='muted'>No promo ads yet.</p>";}
+    async function addPromoAd(){var title=document.getElementById("pa-title").value.trim();var url=document.getElementById("pa-url").value.trim();var desc=document.getElementById("pa-desc").value.trim();if(!title||!url)return setStatus("Enter title and URL.",true);if(!url.startsWith("http"))return setStatus("URL must start with https://",true);var r=await fetch("/admin/promo-ads",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({title:title,url:url,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Promo ad added.",false);document.getElementById("pa-title").value="";document.getElementById("pa-url").value="";document.getElementById("pa-desc").value="";loadAdminPromoAds();loadPromoAds();}
+    async function deletePromoAd(id){if(!confirm("Remove this promo ad?"))return;var r=await fetch("/admin/promo-ads/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Removed.",false);loadAdminPromoAds();loadPromoAds();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; <strong class='ln-yellow'>"+esc(i.price_sats)+" sats</strong> <span class='muted'>"+(i.active?"active":"disabled")+"</span></span><span style='display:flex;gap:6px;'><button onclick='editPrice("+i.id+","+i.price_sats+")' class='btn-secondary' style='padding:6px 12px;'>Edit price</button><button onclick='delNum("+i.id+")' class='btn-danger' style='padding:6px 12px;'>Disable</button></span></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
@@ -343,6 +400,7 @@ const HTML = `<!DOCTYPE html>
     ws.onerror=function(){console.warn("WS error");};
     setInterval(function(){if(token&&role!=="admin")loadSessions();},60000);
     if(token)refreshAll();
+    loadAnnouncements();loadPromoAds();loadCryptoNews();
     if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js").catch(function(){});}
   </script>
 </body>
@@ -895,6 +953,95 @@ app.get("/api/sms-sent/:id", wrap(async function(req, res) {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
   await pool.query("UPDATE outbox SET status = 'sent' WHERE id = $1", [id]);
+  res.json({ ok: true });
+}));
+
+// PUBLIC: announcements (no auth)
+app.get("/public/announcements", wrap(async function(req, res) {
+  const r = await pool.query("SELECT id, title, body, created_at FROM announcements WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 10");
+  res.json(r.rows);
+}));
+
+// PUBLIC: promo ads (no auth)
+app.get("/public/promo-ads", wrap(async function(req, res) {
+  const r = await pool.query("SELECT id, title, url, description FROM promo_ads WHERE is_active = TRUE ORDER BY sort_order ASC, created_at DESC LIMIT 20");
+  res.json(r.rows);
+}));
+
+// PUBLIC: crypto news (no auth, cached)
+app.get("/public/news", wrap(async function(req, res) {
+  const items = await fetchNews();
+  res.json(items);
+}));
+
+// USER: use referral code
+app.post("/use-referral", auth, wrap(async function(req, res) {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: "Code is required" });
+  const codeRow = await pool.query("SELECT * FROM referral_codes WHERE code = $1 AND is_active = TRUE", [String(code).toUpperCase()]);
+  if (!codeRow.rows.length) return res.status(404).json({ error: "Invalid or expired referral code" });
+  const rc = codeRow.rows[0];
+  if (rc.uses_count >= rc.max_uses) return res.status(400).json({ error: "This code has reached its usage limit" });
+  const already = await pool.query("SELECT id FROM user_referrals WHERE user_id = $1 AND referral_code_id = $2", [req.user.id, rc.id]);
+  if (already.rows.length) return res.status(400).json({ error: "You already used this referral code" });
+  await pool.query("BEGIN");
+  try {
+    await pool.query("INSERT INTO user_referrals (user_id, referral_code_id) VALUES ($1, $2)", [req.user.id, rc.id]);
+    await pool.query("INSERT INTO wallets (user_id, balance_sats) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance_sats = wallets.balance_sats + $2", [req.user.id, rc.bonus_sats]);
+    await pool.query("UPDATE referral_codes SET uses_count = uses_count + 1 WHERE id = $1", [rc.id]);
+    await pool.query("COMMIT");
+    res.json({ bonus_sats: rc.bonus_sats });
+  } catch(e) {
+    await pool.query("ROLLBACK");
+    throw e;
+  }
+}));
+
+// ADMIN: referral codes CRUD
+app.get("/admin/referral-codes", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query("SELECT * FROM referral_codes ORDER BY created_at DESC");
+  res.json(r.rows);
+}));
+app.post("/admin/referral-codes", auth, adminOnly, wrap(async function(req, res) {
+  const { code, bonusSats, description } = req.body;
+  if (!code || !bonusSats) return res.status(400).json({ error: "Code and bonusSats required" });
+  const r = await pool.query("INSERT INTO referral_codes (code, bonus_sats, description) VALUES ($1, $2, $3) RETURNING *", [String(code).toUpperCase(), Number(bonusSats), description || null]);
+  res.json(r.rows[0]);
+}));
+app.delete("/admin/referral-codes/:id", auth, adminOnly, wrap(async function(req, res) {
+  await pool.query("UPDATE referral_codes SET is_active = FALSE WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// ADMIN: announcements CRUD
+app.get("/admin/announcements", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query("SELECT * FROM announcements ORDER BY created_at DESC LIMIT 20");
+  res.json(r.rows);
+}));
+app.post("/admin/announcements", auth, adminOnly, wrap(async function(req, res) {
+  const { title, body } = req.body;
+  if (!title) return res.status(400).json({ error: "Title required" });
+  const r = await pool.query("INSERT INTO announcements (title, body) VALUES ($1, $2) RETURNING *", [title, body || null]);
+  res.json(r.rows[0]);
+}));
+app.delete("/admin/announcements/:id", auth, adminOnly, wrap(async function(req, res) {
+  await pool.query("DELETE FROM announcements WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// ADMIN: promo ads CRUD
+app.get("/admin/promo-ads", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query("SELECT * FROM promo_ads ORDER BY sort_order ASC, created_at DESC");
+  res.json(r.rows);
+}));
+app.post("/admin/promo-ads", auth, adminOnly, wrap(async function(req, res) {
+  const { title, url, description } = req.body;
+  if (!title || !url) return res.status(400).json({ error: "Title and URL required" });
+  const r = await pool.query("INSERT INTO promo_ads (title, url, description) VALUES ($1, $2, $3) RETURNING *", [title, url, description || null]);
+  res.json(r.rows[0]);
+}));
+app.delete("/admin/promo-ads/:id", auth, adminOnly, wrap(async function(req, res) {
+  await pool.query("DELETE FROM promo_ads WHERE id = $1", [req.params.id]);
   res.json({ ok: true });
 }));
 
