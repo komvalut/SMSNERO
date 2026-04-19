@@ -158,6 +158,13 @@ const HTML = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <title>SMSNero</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c0f14">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SMSNero">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.svg">
   <style>
     *{box-sizing:border-box;}
     body{background-color:#0c0f14;background-image:radial-gradient(circle,#1c2535 1.5px,transparent 1.5px);background-size:22px 22px;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;}
@@ -336,6 +343,7 @@ const HTML = `<!DOCTYPE html>
     ws.onerror=function(){console.warn("WS error");};
     setInterval(function(){if(token&&role!=="admin")loadSessions();},60000);
     if(token)refreshAll();
+    if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js").catch(function(){});}
   </script>
 </body>
 </html>`;
@@ -345,6 +353,56 @@ app.use(rateLimit);
 app.get("/healthz", function(req, res) { res.json({ status: "ok" }); });
 app.get("/favicon.ico", function(req, res) { res.status(204).end(); });
 app.get("/", function(req, res) { res.send(HTML); });
+
+const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#0c0f14"/><polygon points="108,20 60,108 96,108 84,172 140,80 104,80" fill="url(#lg)"/><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#ff6600"/><stop offset="100%" stop-color="#cc1a00"/></linearGradient></defs></svg>`;
+
+app.get("/icon-192.svg", function(req, res) {
+  res.setHeader("Content-Type", "image/svg+xml");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(ICON_SVG);
+});
+app.get("/icon-512.svg", function(req, res) {
+  res.setHeader("Content-Type", "image/svg+xml");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(ICON_SVG.replace('viewBox="0 0 192 192"', 'viewBox="0 0 512 512"').replace('width="192" height="192"', 'width="512" height="512"').replace('rx="40"', 'rx="80"'));
+});
+app.get("/manifest.json", function(req, res) {
+  res.setHeader("Content-Type", "application/manifest+json");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.json({
+    name: "SMSNero",
+    short_name: "SMSNero",
+    description: "Rent phone numbers and receive SMS/OTP via Bitcoin Lightning",
+    start_url: "/",
+    display: "standalone",
+    background_color: "#0c0f14",
+    theme_color: "#0c0f14",
+    orientation: "portrait-primary",
+    icons: [
+      { src: "/icon-192.svg", sizes: "192x192", type: "image/svg+xml", purpose: "any maskable" },
+      { src: "/icon-512.svg", sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }
+    ]
+  });
+});
+app.get("/sw.js", function(req, res) {
+  res.setHeader("Content-Type", "application/javascript");
+  res.setHeader("Cache-Control", "no-cache");
+  res.send(`
+const CACHE="smsnero-v1";
+self.addEventListener("install",function(e){
+  e.waitUntil(caches.open(CACHE).then(function(c){return c.add("/");}));
+  self.skipWaiting();
+});
+self.addEventListener("activate",function(e){
+  e.waitUntil(caches.keys().then(function(keys){return Promise.all(keys.filter(function(k){return k!==CACHE;}).map(function(k){return caches.delete(k);}));}));
+  self.clients.claim();
+});
+self.addEventListener("fetch",function(e){
+  if(e.request.method!=="GET")return;
+  e.respondWith(fetch(e.request).catch(function(){return caches.match("/");}));
+});
+  `.trim());
+});
 
 app.post("/register", wrap(async function(req, res) {
   const username = "user" + Date.now();
