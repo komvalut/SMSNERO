@@ -199,18 +199,21 @@ const HTML = `<!DOCTYPE html>
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.svg">
   <style>
+    :root{--btn-a:#ff5500;--btn-b:#cc1a00;}
     *{box-sizing:border-box;}
     body{background-color:#0c0f14;background-image:radial-gradient(circle,#1c2535 1.5px,transparent 1.5px);background-size:22px 22px;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;}
     main{max-width:680px;margin:auto;padding:24px 16px;}
-    h1{font-size:2em;font-weight:800;margin:0 0 4px;background:linear-gradient(135deg,#ff6600,#ff2200);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+    h1{font-size:2em;font-weight:800;margin:0;background:linear-gradient(135deg,var(--btn-a),var(--btn-b));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;transition:background 0.3s;}
     h3{margin:4px 0 12px;font-size:1.1em;color:#e2e8f0;}
     h4{margin:0 0 10px;color:#e2e8f0;}
     .box{padding:18px;margin:12px 0;background:#131926;border-radius:16px;border:1px solid #1e2d40;box-shadow:0 2px 12px rgba(0,0,0,0.4);}
-    button{background:linear-gradient(135deg,#ff5500,#cc1a00);border:none;padding:10px 16px;cursor:pointer;margin:4px;font-weight:700;border-radius:10px;color:#fff;font-size:0.95em;transition:opacity 0.15s;}
+    button{background:linear-gradient(135deg,var(--btn-a),var(--btn-b));border:none;padding:10px 16px;cursor:pointer;margin:4px;font-weight:700;border-radius:10px;color:#fff;font-size:0.95em;transition:opacity 0.15s;}
     button:hover{opacity:0.85;}
     button:active{opacity:0.7;}
     .btn-secondary{background:linear-gradient(135deg,#2a3040,#1e2535)!important;color:#aab4c8!important;border:1px solid #2a3a50!important;}
     .btn-danger{background:linear-gradient(135deg,#7f1d1d,#450a0a)!important;color:#fca5a5!important;border:1px solid #ef4444!important;}
+    .btn-theme{background:#1e2d40!important;border:1px solid #2a3a50!important;padding:0!important;width:38px;height:38px;border-radius:50%!important;font-size:1.15em;display:inline-flex;align-items:center;justify-content:center;transition:transform 0.2s!important;}
+    .btn-theme:hover{transform:scale(1.15);opacity:1!important;}
     input,textarea,select{padding:10px 12px;margin:4px;border-radius:10px;border:1px solid #2a3a50;background:#0d1520;color:#e2e8f0;font-size:0.95em;}
     input::placeholder,textarea::placeholder{color:#4a5568;}
     a{color:#ff8040;}
@@ -221,13 +224,16 @@ const HTML = `<!DOCTYPE html>
     .tabs{display:flex;gap:4px;margin:18px 0 0;background:#131926;border:1px solid #1e2d40;border-radius:14px;padding:5px;}
     .tab{background:none;border:none;color:#718096;padding:9px 0;font-size:0.95em;font-weight:600;border-radius:10px;cursor:pointer;margin:0;flex:1;transition:all 0.2s;}
     .tab.active{background:#ffffff;color:#0c0f14;}
-    .badge{background:linear-gradient(135deg,#ff5500,#cc1a00);color:#fff;border-radius:10px;padding:2px 8px;font-size:0.78em;margin-left:5px;}
+    .badge{background:linear-gradient(135deg,var(--btn-a),var(--btn-b));color:#fff;border-radius:10px;padding:2px 8px;font-size:0.78em;margin-left:5px;}
     .ln-yellow{color:#fbbf24;font-weight:bold;}
   </style>
 </head>
 <body>
   <main>
-    <h1>&#9889; SMSNero</h1>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;">
+      <h1>&#9889; SMSNero</h1>
+      <button id="theme-btn" class="btn-theme" onclick="cycleTheme()" title="Change color theme">&#128293;</button>
+    </div>
     <p class="muted">Rent phone numbers and receive SMS/OTP messages. Paid via Bitcoin Lightning.</p>
     <div class="box">
       <button onclick="registerUser()">&#9889; Register</button>
@@ -316,6 +322,10 @@ const HTML = `<!DOCTYPE html>
     var token=localStorage.getItem("smsnero_token")||"";
     var role=localStorage.getItem("smsnero_role")||"";
     var _activeTab="rent";
+    var THEMES=[{e:"&#128293;",a:"#ff5500",b:"#cc1a00"},{e:"&#128153;",a:"#1d4ed8",b:"#1e40af"},{e:"&#128154;",a:"#16a34a",b:"#15803d"},{e:"&#128155;",a:"#7c3aed",b:"#6d28d9"},{e:"&#128156;",a:"#db2777",b:"#be185d"},{e:"&#129473;",a:"#0891b2",b:"#0e7490"},{e:"&#128149;",a:"#d97706",b:"#92400e"}];
+    var _themeIdx=Number(localStorage.getItem("smsnero_theme")||0);
+    function applyTheme(idx){var t=THEMES[idx%THEMES.length];document.documentElement.style.setProperty("--btn-a",t.a);document.documentElement.style.setProperty("--btn-b",t.b);var btn=document.getElementById("theme-btn");if(btn)btn.innerHTML=t.e;}
+    function cycleTheme(){_themeIdx=(_themeIdx+1)%THEMES.length;localStorage.setItem("smsnero_theme",_themeIdx);applyTheme(_themeIdx);}
     function esc(v){return String(v).replace(/[&<>'"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]});}
     function setStatus(msg,err){var el=document.getElementById("status");el.className=err?"error":"muted";el.textContent=msg;}
     function authH(ex){return Object.assign({},ex||{},{Authorization:"Bearer "+token});}
@@ -377,8 +387,8 @@ const HTML = `<!DOCTYPE html>
     async function loadMySent(){if(!token||role==="admin")return;var r=await fetch("/my-sent",{headers:authH()});if(!r.ok)return;var data=await r.json();var box=document.getElementById("my-sent-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="";data.forEach(function(i){var col=i.status==="sent"?"#4ade80":"#facc15";h+="<div class='box row'><span><strong>"+esc(i.recipient)+"</strong><br><span class='muted' style='font-size:0.85em;'>"+esc(i.message)+"</span></span><span style='color:"+col+";font-weight:bold;font-size:0.88em;'>"+esc(i.status)+"</span></div>";});document.getElementById("my-sent-list").innerHTML=h;}
     var _p2pData={};
     async function buyP2P(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({p2pListingId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open in Browser</a>":"";switchTab("rent");document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR (P2P)</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"</div>";startPolling();}
-    var COUNTRIES=["Sweden","USA","UK","Germany","France","Netherlands","Poland","Spain","Italy","Romania","Ukraine","Russia","Turkey","Brazil","India","Canada","Australia","Belgium","Czech Republic","Hungary","Portugal","Finland","Norway","Denmark","Switzerland","Austria","Greece","Serbia","Croatia","Bosnia","Slovenia","Slovakia","Bulgaria","Estonia","Latvia","Lithuania","Other"];
-    var SERVICES=["Telegram","WhatsApp","Viber","Signal","Instagram","Facebook","Twitter / X","TikTok","Snapchat","Google","Apple","Microsoft","Amazon","Netflix","Uber","Airbnb","LinkedIn","Discord","Tinder","Bumble","Other"];
+    var COUNTRIES=["Albania","Argentina","Australia","Austria","Bangladesh","Belarus","Belgium","Bosnia","Brazil","Bulgaria","Canada","Chile","China","Colombia","Croatia","Czech Republic","Denmark","Egypt","Estonia","Finland","France","Germany","Greece","Hong Kong","Hungary","India","Indonesia","Ireland","Israel","Italy","Japan","Kazakhstan","Kenya","Kosovo","Latvia","Lithuania","Malaysia","Mexico","Montenegro","Morocco","Netherlands","New Zealand","Nigeria","North Macedonia","Norway","Pakistan","Peru","Philippines","Poland","Portugal","Romania","Russia","Saudi Arabia","Serbia","Singapore","Slovakia","Slovenia","South Africa","South Korea","Spain","Sweden","Switzerland","Taiwan","Thailand","Turkey","UAE","UK","Ukraine","USA","Vietnam","Other"];
+    var SERVICES=["Telegram","WhatsApp","Viber","Signal","Instagram","Facebook","Messenger","Twitter / X","TikTok","Snapchat","YouTube","Twitch","Discord","LinkedIn","Pinterest","Reddit","Clubhouse","BeReal","Threads","Google","Apple","Microsoft","Amazon","Netflix","Spotify","Disney+","HBO Max","Hulu","Prime Video","Steam","Twitch","Uber","Uber Eats","Airbnb","Booking.com","Fiverr","Upwork","Etsy","eBay","Shopify","Tinder","Bumble","Hinge","Badoo","OkCupid","PayPal","Cash App","Venmo","Wise","Revolut","Skrill","Neteller","N26","Monzo","Coinbase","Binance","Bybit","OKX","KuCoin","Kraken","Bitget","MEXC","Gate.io","Nexo","Crypto.com","Dropbox","GitHub","Slack","Zoom","Teams","Notion","Trello","Figma","ChatGPT","Other"];
     var _numsData={};
     async function loadNumbers(){if(!token)return;var r=await fetch("/numbers",{headers:authH()});if(!r.ok)return setStatus("Login again.",true);var data=await r.json();_numsData={};var h="<h3>Available numbers</h3>";if(!data.length)h+="<p class='muted'>No numbers available.</p>";data.forEach(function(i){_numsData[i.id]={phone:i.phone_number,sats:i.price_sats};h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong><br><span class='ln-yellow' style='font-size:0.9em;'>&#9889; "+esc(i.price_sats)+" sats</span></span><button onclick='showBuyPanel("+i.id+")'>&#9889; Buy</button></div>";});document.getElementById("numbers").innerHTML=h;}
     function showBuyPanel(id){var num=_numsData[id]||{};var phone=num.phone||"";var sats=num.sats||"";var cOpts=COUNTRIES.map(function(c){return"<option>"+esc(c)+"</option>";}).join("");var sOpts=SERVICES.map(function(s){return"<option>"+esc(s)+"</option>";}).join("");document.getElementById("qr").innerHTML="<div class='box'><h3>&#9889; "+esc(phone)+"</h3><div class='row' style='gap:12px;margin-bottom:14px;'><div style='flex:1'><label class='muted' style='font-size:0.85em;'>Country</label><br><select id='selCountry' style='width:100%;margin-top:4px;'>"+cOpts+"</select></div><div style='flex:1'><label class='muted' style='font-size:0.85em;'>Service</label><br><select id='selService' style='width:100%;margin-top:4px;'>"+sOpts+"</select></div></div><p style='font-size:1em;margin:0 0 14px;'>Price: <strong class='ln-yellow'>&#9889; "+esc(sats)+" sats</strong></p><button onclick='buyNum("+id+")' style='width:100%;padding:13px;font-size:1.05em;'>&#9889; Pay via Lightning</button><br><button onclick='clearQR()' class='btn-secondary' style='width:100%;margin-top:6px;padding:10px;'>Cancel</button></div>";document.getElementById("qr").scrollIntoView({behavior:"smooth"});}
@@ -399,6 +409,7 @@ const HTML = `<!DOCTYPE html>
     ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==="session_activated"){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();loadMessages();loadWalletBalance();setTimeout(function(){var el=document.getElementById("sessions");if(el)el.scrollIntoView({behavior:"smooth"});},300);}else if(m.type==="message"){loadMessages();if(m.otp){showNotif("SMSNero: New OTP arrived","Code: "+m.otp);}}else if(m.type==="wallet_topped_up"){loadWalletBalance();setStatus("Wallet topped up!",false);document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";}else if(m.type==="send_credit_activated"){checkSendCredit();setStatus("Send credit activated!",false);}}catch(err){}};
     ws.onerror=function(){console.warn("WS error");};
     setInterval(function(){if(token&&role!=="admin")loadSessions();},60000);
+    applyTheme(_themeIdx);
     if(token)refreshAll();
     loadAnnouncements();loadPromoAds();loadCryptoNews();
     if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js").catch(function(){});}
