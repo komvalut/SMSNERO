@@ -140,7 +140,13 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS p2p_listings (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, phone_number TEXT NOT NULL, price_sats INTEGER NOT NULL CHECK (price_sats > 0), description TEXT, active BOOLEAN NOT NULL DEFAULT TRUE, approved BOOLEAN NOT NULL DEFAULT FALSE, owner_earned_sats INTEGER NOT NULL DEFAULT 0, owner_paid_sats INTEGER NOT NULL DEFAULT 0, number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS p2p_listing_id BIGINT REFERENCES p2p_listings(id) ON DELETE SET NULL`);
   await pool.query(`ALTER TABLE p2p_listings ADD COLUMN IF NOT EXISTS number_id INTEGER REFERENCES numbers(id) ON DELETE SET NULL`);
-  await pool.query(`CREATE TABLE IF NOT EXISTS outbox (id BIGSERIAL PRIMARY KEY, recipient TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS send_numbers (id SERIAL PRIMARY KEY, phone_number TEXT NOT NULL UNIQUE, price_sats INTEGER NOT NULL CHECK (price_sats > 0), active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS outbox (id BIGSERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, send_number_id INTEGER REFERENCES send_numbers(id) ON DELETE SET NULL, recipient TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`ALTER TABLE outbox ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE outbox ADD COLUMN IF NOT EXISTS send_number_id INTEGER REFERENCES send_numbers(id) ON DELETE SET NULL`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS send_credits (id BIGSERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, send_number_id INTEGER NOT NULL REFERENCES send_numbers(id) ON DELETE CASCADE, invoice_id BIGINT, used BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS send_number_id INTEGER REFERENCES send_numbers(id) ON DELETE SET NULL`);
+  await pool.query(`ALTER TABLE invoices ALTER COLUMN number_id DROP NOT NULL`);
   console.log("Database initialized.");
 }
 
@@ -180,13 +186,13 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div id="admin" class="box" style="display:none"></div>
     <div class="tabs">
-      <button class="tab active" id="tab-btn-rent" onclick="switchTab('rent')">Rent</button>
+      <button class="tab active" id="tab-btn-rent" onclick="switchTab('rent')">Receive OTP</button>
       <button class="tab" id="tab-btn-p2p" onclick="switchTab('p2p')">P2P Market</button>
       <button class="tab" id="tab-btn-send" onclick="switchTab('send')">Send SMS</button>
     </div>
     <div id="tab-rent">
       <div id="qr"></div>
-      <div id="numbers" class="box">Login or register to load numbers.</div>
+      <div id="numbers" class="box"><p class="muted" style="font-size:0.9em;">Buy a number to receive a one-time OTP verification code (Telegram, WhatsApp, etc.).</p>Login or register to load numbers.</div>
       <div id="sessions" class="box"><h3>My active numbers</h3></div>
       <div id="otp" class="box"><h3>OTP Inbox</h3></div>
     </div>
@@ -196,28 +202,43 @@ const HTML = `<!DOCTYPE html>
       <div id="p2p-my-listings"></div>
     </div>
     <div id="tab-send" style="display:none">
-      <div class="box" id="send-form-box" style="display:none">
-        <h3>Send SMS</h3>
-        <p class="muted" style="font-size:0.88em;">Messages are sent from your SIM via MacroDroid. MacroDroid must be running and polling.</p>
-        <div style="display:flex;flex-direction:column;gap:8px;max-width:480px;">
-          <input id="send-recipient" placeholder="Recipient number (+38761...)" style="width:100%">
-          <textarea id="send-message" placeholder="Message text..." rows="4" style="width:100%;box-sizing:border-box;resize:vertical;"></textarea>
-          <button onclick="sendSMS()" style="width:100%;">Send</button>
+      <div class="box" id="send-login-box" style="display:none"><p class="muted">Login or register to use Send SMS.</p></div>
+      <!-- ADMIN view -->
+      <div id="send-admin-panel" style="display:none">
+        <div class="box">
+          <h3>Send Numbers</h3>
+          <p class="muted" style="font-size:0.88em;">Add numbers that clients can send SMS from (sent via MacroDroid from your phone).</p>
+          <input id="sn-phone" placeholder="+46700000001" style="width:180px">
+          <span style="display:inline-flex;align-items:center;gap:4px;"><input id="sn-price" type="number" min="1" placeholder="0" style="width:110px"><span style="color:#facc15;font-weight:bold;">sats</span></span>
+          <button onclick="addSendNumber()">Add number</button>
+          <div id="send-numbers-admin-list" style="margin-top:10px;"></div>
+        </div>
+        <div class="box"><h3>Outbox</h3><div id="outbox-list"><p class="muted">No messages yet.</p></div></div>
+        <div class="box" style="background:#1a1a2e;border:1px solid #3333aa;">
+          <h4 style="color:#a5b4fc;">MacroDroid Setup (jednom)</h4>
+          <ol style="color:#ccc;font-size:0.87em;line-height:1.9em;">
+            <li><strong>Trigger:</strong> Periodic timer &mdash; svake <strong>30 sekundi</strong></li>
+            <li><strong>Action 1:</strong> HTTP Request GET &rarr;<br><code id="poll-url" style="color:#facc15;font-size:0.9em;word-break:break-all;"></code></li>
+            <li><strong>Condition:</strong> HTTP response code = 200 (preskoči ako 204)</li>
+            <li><strong>Action 2:</strong> Send SMS &rarr; primatelj: <code style="color:#a5b4fc;">{http_response_body:json_object:recipient}</code> &nbsp; tekst: <code style="color:#a5b4fc;">{http_response_body:json_object:message}</code></li>
+            <li><strong>Action 3:</strong> HTTP Request GET &rarr;<br><code id="ack-url" style="color:#4ade80;font-size:0.9em;word-break:break-all;"></code></li>
+          </ol>
         </div>
       </div>
-      <div class="box" id="send-login-box"><p class="muted">Login as admin to send SMS.</p></div>
-      <div class="box" id="send-outbox" style="display:none"><h3>Outbox</h3><div id="outbox-list"><p class="muted">No messages yet.</p></div></div>
-      <div class="box" style="background:#1a1a2e;border:1px solid #3333aa;" id="send-setup-box" style="display:none">
-        <h4 style="color:#a5b4fc;">MacroDroid Setup</h4>
-        <p class="muted" style="font-size:0.87em;">Create a new macro in MacroDroid:</p>
-        <ol style="color:#ccc;font-size:0.87em;line-height:1.8em;">
-          <li><strong>Trigger:</strong> Periodic timer &mdash; every <strong>30 seconds</strong></li>
-          <li><strong>Action 1:</strong> HTTP Request GET &rarr; URL:<br><code id="poll-url" style="color:#facc15;word-break:break-all;"></code></li>
-          <li><strong>Action 2:</strong> If variable <em>http_response_body</em> NOT empty &rarr; parse JSON</li>
-          <li><strong>Action 3:</strong> Send SMS to <em>[id_recipient]</em> with text <em>[id_message]</em></li>
-          <li><strong>Action 4:</strong> HTTP Request GET &rarr; URL:<br><code id="ack-url" style="color:#a5b4fc;word-break:break-all;"></code></li>
-        </ol>
-        <p class="muted" style="font-size:0.82em;">MacroDroid čita red čekanja, šalje SMS sa SIM kartice i potvrđuje isporuku.</p>
+      <!-- CLIENT view -->
+      <div id="send-client-panel" style="display:none">
+        <div class="box"><h3>Send SMS</h3><p class="muted">Buy a credit to send one SMS from our number. Paid via Bitcoin Lightning.</p><div id="send-numbers-list"><p class="muted">Loading...</p></div></div>
+        <div id="send-qr"></div>
+        <div class="box" id="send-compose-box" style="display:none">
+          <h3>Compose message</h3>
+          <p class="muted" style="font-size:0.87em;">You have a send credit. Enter recipient and message:</p>
+          <div style="display:flex;flex-direction:column;gap:8px;max-width:480px;">
+            <input id="send-recipient" placeholder="Recipient number (+38761...)" style="width:100%">
+            <textarea id="send-message" placeholder="Message text..." rows="4" style="width:100%;box-sizing:border-box;resize:vertical;"></textarea>
+            <button onclick="submitMessage()" style="width:100%;">Send</button>
+          </div>
+        </div>
+        <div class="box" id="my-sent-box" style="display:none"><h3>My sent messages</h3><div id="my-sent-list"></div></div>
       </div>
     </div>
   </main>
@@ -246,9 +267,18 @@ const HTML = `<!DOCTYPE html>
     async function submitP2P(){var phone=document.getElementById("p2p-phone").value.trim();var price=Number(document.getElementById("p2p-price").value);var desc=document.getElementById("p2p-desc").value.trim();if(!phone||!price)return setStatus("Enter phone number and price.",true);var r=await fetch("/p2p/submit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({phoneNumber:phone,priceSats:price,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Listing submitted! Waiting for admin approval.",false);document.getElementById("p2p-phone").value="";document.getElementById("p2p-price").value="";document.getElementById("p2p-desc").value="";loadMyP2PListings();}
     async function loadP2PMarket(){if(!token)return;var r=await fetch("/p2p/market",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No listings in the marketplace yet. Be the first to list your number!</p>";data.forEach(function(i){h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='buyP2P("+i.id+")'>Buy</button></div>";});document.getElementById("p2p-market").innerHTML=h;}
     async function loadMyP2PListings(){if(!token)return;var r=await fetch("/p2p/my-listings",{headers:authH()});if(!r.ok)return;var data=await r.json();if(!data.length){document.getElementById("p2p-my-listings").innerHTML="";document.getElementById("p2p-submit-box").style.display="block";return;}document.getElementById("p2p-submit-box").style.display="block";var h="<div class='box'><h4>My listings</h4>";data.forEach(function(i){var earned=i.owner_earned_sats||0;var paid=i.owner_paid_sats||0;h+="<div class='box' style='margin:8px 0;'><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats &mdash; <span style='color:"+(i.approved?"#4ade80":"#fca5a5")+"'>"+(i.approved?"Active":"Pending approval")+"</span><br><span class='muted' style='font-size:0.85em;'>Earned: "+earned+" sats | Paid out: "+paid+" sats | Owed: "+(earned-paid)+" sats</span></div>";});h+="</div>";document.getElementById("p2p-my-listings").innerHTML=h;}
-    function renderSendTab(){var isAdmin=role==="admin";document.getElementById("send-form-box").style.display=isAdmin?"block":"none";document.getElementById("send-login-box").style.display=isAdmin?"none":"block";document.getElementById("send-outbox").style.display=isAdmin?"block":"none";document.getElementById("send-setup-box").style.display=isAdmin?"block":"none";if(isAdmin){var base=location.origin;var key=token;document.getElementById("poll-url").textContent=base+"/api/pending-sms?key="+key;document.getElementById("ack-url").textContent=base+"/api/sms-sent/[id]?key="+key;loadOutbox();}}
-    async function sendSMS(){var recipient=document.getElementById("send-recipient").value.trim();var message=document.getElementById("send-message").value.trim();if(!recipient||!message)return setStatus("Enter recipient and message.",true);var r=await fetch("/admin/send-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({recipient:recipient,message:message})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Message queued for delivery.",false);document.getElementById("send-recipient").value="";document.getElementById("send-message").value="";loadOutbox();}
-    async function loadOutbox(){if(role!=="admin")return;var r=await fetch("/admin/outbox",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No messages yet.</p>";data.forEach(function(i){var col=i.status==="sent"?"#4ade80":i.status==="failed"?"#fca5a5":"#facc15";h+="<div class='box row'><span><strong>"+esc(i.recipient)+"</strong><br><span class='muted' style='font-size:0.87em;'>"+esc(i.message)+"</span></span><span style='color:"+col+";font-weight:bold;font-size:0.9em;'>"+esc(i.status)+"<br><span style='color:#666;font-size:0.8em;'>"+esc(new Date(i.created_at).toLocaleString())+"</span></span></div>";});document.getElementById("outbox-list").innerHTML=h;}
+    function renderSendTab(){if(!token){document.getElementById("send-login-box").style.display="block";document.getElementById("send-admin-panel").style.display="none";document.getElementById("send-client-panel").style.display="none";return;}document.getElementById("send-login-box").style.display="none";if(role==="admin"){document.getElementById("send-admin-panel").style.display="block";document.getElementById("send-client-panel").style.display="none";var base=location.origin;document.getElementById("poll-url").textContent=base+"/api/pending-sms?key="+token;document.getElementById("ack-url").textContent=base+"/api/sms-sent/[id]?key="+token;loadSendNumbersAdmin();loadOutbox();}else{document.getElementById("send-admin-panel").style.display="none";document.getElementById("send-client-panel").style.display="block";loadSendNumbers();checkSendCredit();loadMySent();}}
+    async function addSendNumber(){var phone=document.getElementById("sn-phone").value.trim();var price=Number(document.getElementById("sn-price").value);if(!phone||!price)return setStatus("Enter phone and price.",true);var r=await fetch("/admin/send-numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({phoneNumber:phone,priceSats:price})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Send number added.",false);document.getElementById("sn-phone").value="";document.getElementById("sn-price").value="";loadSendNumbersAdmin();}
+    async function loadSendNumbersAdmin(){if(role!=="admin")return;var r=await fetch("/admin/send-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong> &mdash; "+esc(i.price_sats)+" sats ["+(i.active?"active":"disabled")+"]</span><button onclick='disableSendNumber("+i.id+")' style='background:#ef4444;color:white;padding:6px 12px;'>Disable</button></div>";});document.getElementById("send-numbers-admin-list").innerHTML=h||"<p class='muted'>No send numbers yet.</p>";}
+    async function disableSendNumber(id){var r=await fetch("/admin/send-numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadSendNumbersAdmin();}
+    async function loadOutbox(){if(role!=="admin")return;var r=await fetch("/admin/outbox",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";if(!data.length)h="<p class='muted'>No messages yet.</p>";data.forEach(function(i){var col=i.status==="sent"?"#4ade80":i.status==="failed"?"#fca5a5":"#facc15";h+="<div class='box row'><span><strong>"+esc(i.recipient)+"</strong><br><span class='muted' style='font-size:0.85em;'>"+esc(i.message)+"</span></span><span style='color:"+col+";font-weight:bold;font-size:0.88em;'>"+esc(i.status)+"<br><span style='color:#555;font-size:0.8em;'>"+esc(new Date(i.created_at).toLocaleString())+"</span></span></div>";});document.getElementById("outbox-list").innerHTML=h;}
+    var _sendNums={};
+    async function loadSendNumbers(){if(!token||role==="admin")return;var r=await fetch("/send-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();_sendNums={};var h="";if(!data.length)h="<p class='muted'>No send numbers available yet.</p>";data.forEach(function(i){_sendNums[i.id]=i;h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong><br><span class='muted' style='font-size:0.85em;'>Send 1 SMS from this number &mdash; "+esc(i.price_sats)+" sats</span></span><button onclick='buySendCredit("+i.id+")'>Buy</button></div>";});document.getElementById("send-numbers-list").innerHTML=h;}
+    var _sendPollTimer=null;
+    async function buySendCredit(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({sendNumberId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml=_lightningInvoice?"<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Invoice</button>":"";var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open in Browser</a>":"";document.getElementById("send-qr").innerHTML="<div class='box'><h3>Scan Lightning QR</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"</div>";if(_sendPollTimer)clearInterval(_sendPollTimer);_sendPollTimer=setInterval(async function(){var cr=await fetch("/my-send-credit",{headers:authH()});if(!cr.ok)return;var cd=await cr.json();if(cd&&cd.id){clearInterval(_sendPollTimer);_sendPollTimer=null;document.getElementById("send-qr").innerHTML="";setStatus("Payment confirmed! Compose your message.",false);checkSendCredit();}},5000);}
+    async function checkSendCredit(){if(!token||role==="admin")return;var r=await fetch("/my-send-credit",{headers:authH()});if(!r.ok)return;var credit=await r.json();var composeBox=document.getElementById("send-compose-box");if(credit&&credit.id){composeBox.style.display="block";composeBox.dataset.creditId=credit.id;}else{composeBox.style.display="none";}}
+    async function submitMessage(){var creditId=document.getElementById("send-compose-box").dataset.creditId;var recipient=document.getElementById("send-recipient").value.trim();var message=document.getElementById("send-message").value.trim();if(!recipient||!message)return setStatus("Enter recipient and message.",true);var r=await fetch("/send-message",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({creditId:creditId,recipient:recipient,message:message})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Message queued! Will be sent shortly.",false);document.getElementById("send-recipient").value="";document.getElementById("send-message").value="";document.getElementById("send-compose-box").style.display="none";loadMySent();}
+    async function loadMySent(){if(!token||role==="admin")return;var r=await fetch("/my-sent",{headers:authH()});if(!r.ok)return;var data=await r.json();var box=document.getElementById("my-sent-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="";data.forEach(function(i){var col=i.status==="sent"?"#4ade80":"#facc15";h+="<div class='box row'><span><strong>"+esc(i.recipient)+"</strong><br><span class='muted' style='font-size:0.85em;'>"+esc(i.message)+"</span></span><span style='color:"+col+";font-weight:bold;font-size:0.88em;'>"+esc(i.status)+"</span></div>";});document.getElementById("my-sent-list").innerHTML=h;}
     var _p2pData={};
     async function buyP2P(id){setStatus("Creating invoice...",false);var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({p2pListingId:id})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);setStatus("Scan QR to pay.",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;margin-top:8px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:4px;'>Copy Lightning Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank'>Open in Browser</a>":"";switchTab("rent");document.getElementById("qr").innerHTML="<div class='box'><h3>Scan Lightning QR (P2P)</h3><p>Amount: "+esc(inv.amount_sats)+" sats</p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"</div>";startPolling();}
     var COUNTRIES=["Sweden","USA","UK","Germany","France","Netherlands","Poland","Spain","Italy","Romania","Ukraine","Russia","Turkey","Brazil","India","Canada","Australia","Belgium","Czech Republic","Hungary","Portugal","Finland","Norway","Denmark","Switzerland","Austria","Greece","Serbia","Croatia","Bosnia","Slovenia","Slovakia","Bulgaria","Estonia","Latvia","Lithuania","Other"];
@@ -368,8 +398,15 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   if (!SWISS_API_KEY || !SWISS_SECRET_KEY) {
     return res.status(503).json({ error: "Payment not configured. Set SWISS_API_KEY and SWISS_SECRET_KEY." });
   }
-  let number, p2pListingId = null;
-  if (req.body.p2pListingId) {
+  let number, p2pListingId = null, sendNumberId = null;
+  if (req.body.sendNumberId) {
+    const sid = Number(req.body.sendNumberId);
+    if (!Number.isInteger(sid) || sid <= 0) return res.status(400).json({ error: "Invalid send number ID" });
+    const sr = await pool.query("SELECT id, phone_number, price_sats FROM send_numbers WHERE id = $1 AND active = TRUE", [sid]);
+    if (!sr.rows[0]) return res.status(400).json({ error: "Send number not available" });
+    number = { id: sr.rows[0].id, phone_number: sr.rows[0].phone_number, price_sats: sr.rows[0].price_sats, _isSend: true };
+    sendNumberId = sid;
+  } else if (req.body.p2pListingId) {
     const lid = Number(req.body.p2pListingId);
     if (!Number.isInteger(lid) || lid <= 0) return res.status(400).json({ error: "Invalid P2P listing ID" });
     const lr = await pool.query("SELECT * FROM p2p_listings WHERE id = $1 AND approved = TRUE AND active = TRUE", [lid]);
@@ -420,9 +457,10 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   const qr = await QRCode.toDataURL(qrSource);
   const country = String(req.body.country || "").trim().slice(0, 100) || null;
   const service = String(req.body.service || "").trim().slice(0, 100) || null;
+  const numIdForInvoice = number._isSend ? null : number.id;
   const result = await pool.query(
-    "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, country, service, p2p_listing_id) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9) RETURNING *",
-    [data.id || null, req.user.id, number.id, number.price_sats, checkoutUrl || qrSource, qr, country, service, p2pListingId]
+    "INSERT INTO invoices (provider_payment_id, user_id, number_id, amount_sats, status, checkout_url, qr, country, service, p2p_listing_id, send_number_id) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10) RETURNING *",
+    [data.id || null, req.user.id, numIdForInvoice, number.price_sats, checkoutUrl || qrSource, qr, country, service, p2pListingId, sendNumberId]
   );
   const row = result.rows[0];
   row.lightning_invoice = lightningInvoice;
@@ -440,13 +478,18 @@ app.post("/webhook", wrap(async function(req, res) {
   if (!invoice) return res.sendStatus(404);
   if (status === "paid" || status === "settled" || status === "confirmed") {
     await pool.query("UPDATE invoices SET status = 'paid' WHERE id = $1", [invoice.id]);
-    const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
-    await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.number_id, invoice.id, expiresAt, invoice.country || null, invoice.service || null]);
-    if (invoice.p2p_listing_id) {
-      const ownerShare = Math.floor(invoice.amount_sats * 0.5);
-      await pool.query("UPDATE p2p_listings SET owner_earned_sats = owner_earned_sats + $1 WHERE id = $2", [ownerShare, invoice.p2p_listing_id]);
+    if (invoice.send_number_id) {
+      await pool.query("INSERT INTO send_credits (user_id, send_number_id, invoice_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.send_number_id, invoice.id]);
+      broadcast({ type: "send_credit_activated", userId: invoice.user_id });
+    } else {
+      const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
+      await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.number_id, invoice.id, expiresAt, invoice.country || null, invoice.service || null]);
+      if (invoice.p2p_listing_id) {
+        const ownerShare = Math.floor(invoice.amount_sats * 0.5);
+        await pool.query("UPDATE p2p_listings SET owner_earned_sats = owner_earned_sats + $1 WHERE id = $2", [ownerShare, invoice.p2p_listing_id]);
+      }
+      broadcast({ type: "session_activated", userId: invoice.user_id, numberId: invoice.number_id });
     }
-    broadcast({ type: "session_activated", userId: invoice.user_id, numberId: invoice.number_id });
     return res.sendStatus(200);
   }
   if (status === "expired" || status === "cancelled" || status === "failed") {
@@ -577,25 +620,72 @@ app.post("/admin/p2p/:id/payout", auth, adminOnly, wrap(async function(req, res)
   res.json({ ok: true });
 }));
 
-// SEND SMS: admin queues a message
-app.post("/admin/send-sms", auth, adminOnly, wrap(async function(req, res) {
-  const recipient = String(req.body.recipient || "").trim();
-  const message = String(req.body.message || "").trim();
-  if (!recipient || !message) return res.status(400).json({ error: "recipient and message required" });
-  const r = await pool.query(
-    "INSERT INTO outbox (recipient, message) VALUES ($1, $2) RETURNING id",
-    [recipient, message]
-  );
-  res.json({ ok: true, id: r.rows[0].id });
+// ADMIN: add a send number
+app.post("/admin/send-numbers", auth, adminOnly, wrap(async function(req, res) {
+  const phone = String(req.body.phoneNumber || "").trim();
+  const price = Number(req.body.priceSats);
+  if (!phone || !phone.startsWith("+")) return res.status(400).json({ error: "Phone must start with +" });
+  if (!Number.isInteger(price) || price <= 0) return res.status(400).json({ error: "Price must be positive sats" });
+  const r = await pool.query("INSERT INTO send_numbers (phone_number, price_sats) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET active = TRUE, price_sats = EXCLUDED.price_sats RETURNING *", [phone, price]);
+  res.json(r.rows[0]);
 }));
 
-// SEND SMS: admin views outbox
+// ADMIN: list send numbers
+app.get("/admin/send-numbers", auth, adminOnly, wrap(async function(req, res) {
+  const r = await pool.query("SELECT * FROM send_numbers ORDER BY created_at DESC");
+  res.json(r.rows);
+}));
+
+// ADMIN: disable a send number
+app.delete("/admin/send-numbers/:id", auth, adminOnly, wrap(async function(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid ID" });
+  await pool.query("UPDATE send_numbers SET active = FALSE WHERE id = $1", [id]);
+  res.json({ ok: true });
+}));
+
+// ADMIN: view outbox
 app.get("/admin/outbox", auth, adminOnly, wrap(async function(req, res) {
   const r = await pool.query("SELECT * FROM outbox ORDER BY created_at DESC LIMIT 100");
   res.json(r.rows);
 }));
 
-// MacroDroid polling: returns next pending SMS (authenticated by admin token as query param)
+// CLIENT: list active send numbers
+app.get("/send-numbers", auth, wrap(async function(req, res) {
+  const r = await pool.query("SELECT id, phone_number, price_sats FROM send_numbers WHERE active = TRUE ORDER BY created_at DESC");
+  res.json(r.rows);
+}));
+
+// CLIENT: check for unused send credit
+app.get("/my-send-credit", auth, wrap(async function(req, res) {
+  const r = await pool.query("SELECT id, send_number_id FROM send_credits WHERE user_id = $1 AND used = FALSE ORDER BY created_at DESC LIMIT 1", [req.user.id]);
+  if (!r.rows.length) return res.status(204).send("");
+  res.json(r.rows[0]);
+}));
+
+// CLIENT: submit a message using a send credit
+app.post("/send-message", auth, wrap(async function(req, res) {
+  if (req.user.role === "admin") return res.status(400).json({ error: "Admin cannot use send credits" });
+  const creditId = Number(req.body.creditId);
+  const recipient = String(req.body.recipient || "").trim();
+  const message = String(req.body.message || "").trim().slice(0, 500);
+  if (!Number.isInteger(creditId) || creditId <= 0) return res.status(400).json({ error: "Invalid credit ID" });
+  if (!recipient || !message) return res.status(400).json({ error: "recipient and message required" });
+  const cr = await pool.query("SELECT * FROM send_credits WHERE id = $1 AND user_id = $2 AND used = FALSE", [creditId, req.user.id]);
+  if (!cr.rows[0]) return res.status(400).json({ error: "No valid send credit found" });
+  const credit = cr.rows[0];
+  await pool.query("UPDATE send_credits SET used = TRUE WHERE id = $1", [creditId]);
+  await pool.query("INSERT INTO outbox (user_id, send_number_id, recipient, message) VALUES ($1, $2, $3, $4)", [req.user.id, credit.send_number_id, recipient, message]);
+  res.json({ ok: true });
+}));
+
+// CLIENT: view own sent messages
+app.get("/my-sent", auth, wrap(async function(req, res) {
+  const r = await pool.query("SELECT recipient, message, status, created_at FROM outbox WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50", [req.user.id]);
+  res.json(r.rows);
+}));
+
+// MacroDroid polling: returns next pending SMS
 app.get("/api/pending-sms", wrap(async function(req, res) {
   const key = String(req.query.key || "").trim();
   if (!key) return res.status(401).json({ error: "Missing key" });
