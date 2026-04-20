@@ -121,6 +121,144 @@ function extractOTP(text) {
   return match ? match[0] : null;
 }
 
+// ============ PROVIDER ADAPTERS ============
+let _btcRate = 65000;
+async function refreshBtcRate() {
+  try {
+    const r = await fetch("https://mempool.space/api/v1/prices");
+    const d = await r.json();
+    if (d && d.USD) { _btcRate = d.USD; }
+  } catch(e) { console.error("BTC rate fetch error:", e.message); }
+}
+refreshBtcRate();
+setInterval(refreshBtcRate, 5 * 60 * 1000);
+
+function usdCentsToSats(cents) {
+  return Math.ceil((cents / 100 / _btcRate) * 100000000);
+}
+
+async function getActiveProvider() {
+  const r = await pool.query("SELECT * FROM sms_providers WHERE is_active = TRUE ORDER BY id ASC LIMIT 1");
+  return r.rows[0] || null;
+}
+
+async function callProvider(provider, path, params) {
+  const isGet = !params;
+  if (provider.provider_type === "smspool" || provider.provider_type === "smspool") {
+    const baseUrl = provider.api_url || "https://api.smspool.net";
+    if (isGet) {
+      const r = await fetch(baseUrl + path);
+      return await r.json();
+    }
+    params.key = provider.api_key;
+    const body = new URLSearchParams(params);
+    const r = await fetch(baseUrl + path, { method: "POST", body });
+    return await r.json();
+  } else if (provider.provider_type === "5sim") {
+    const baseUrl = provider.api_url || "https://5sim.net/v1";
+    const headers = { Authorization: "Bearer " + provider.api_key, Accept: "application/json" };
+    const r = await fetch(baseUrl + path, { headers });
+    return await r.json();
+  }
+  throw new Error("Unknown provider type: " + provider.provider_type);
+}
+
+async function providerGetCountries(provider) {
+  if (provider.provider_type === "smspool") {
+    const data = await callProvider(provider, "/country/retrieve_all");
+    if (!Array.isArray(data)) return [];
+    return data.map(function(c) { return { id: String(c.ID || c.id || c.name), name: String(c.name || c.Name || c.country || c.ID), short_name: String(c.short_name || c.name || "").toLowerCase() }; }).filter(function(c) { return c.name; });
+  } else if (provider.provider_type === "5sim") {
+    const data = await callProvider(provider, "/guest/countries");
+    if (!data || typeof data !== "object") return [];
+    return Object.entries(data).map(function(entry) { return { id: entry[0], name: String(entry[1].text_en || entry[0]), short_name: entry[0] }; });
+  }
+  return [];
+}
+
+async function providerGetServices(provider, country) {
+  if (provider.provider_type === "smspool") {
+    const data = await callProvider(provider, "/service/retrieve_all");
+    if (!Array.isArray(data)) return [];
+    return data.map(function(s) { return { id: String(s.ID || s.id || s.name), name: String(s.name || s.Name || s.service), price_cents: Math.round((s.price || 0.5) * 100) }; }).filter(function(s) { return s.name; });
+  } else if (provider.provider_type === "5sim") {
+    if (!country) return [];
+    const data = await callProvider(provider, "/guest/products/" + encodeURIComponent(country) + "/any");
+    if (!data || typeof data !== "object") return [];
+    return Object.entries(data).map(function(entry) { return { id: entry[0], name: String(entry[0]).replace(/_/g, " "), price_cents: Math.round((entry[1].Price || entry[1].price || 0.5) * 100), available: entry[1].Qty || entry[1].qty || 0 }; });
+  }
+  return [];
+}
+
+async function providerBuyNumber(provider, country, service) {
+  if (provider.provider_type === "smspool") {
+    const data = await callProvider(provider, "/purchase/sms", { country: country, service: service });
+    if (!data.number && !data.phonenumber) throw new Error(data.message || data.error || "SMSPool purchase failed: " + JSON.stringify(data));
+    const phone = String(data.number || data.phonenumber || "");
+    return { phone: phone.startsWith("+") ? phone : ("+" + phone), orderId: String(data.order_id || data.orderId || data.id || "") };
+  } else if (provider.provider_type === "5sim") {
+    const c = encodeURIComponent(String(country).toLowerCase());
+    const s = encodeURIComponent(String(service).toLowerCase());
+    const data = await callProvider(provider, "/user/buy/activation/" + c + "/any/" + s);
+    if (!data.phone) throw new Error(data.message || "5sim purchase failed: " + JSON.stringify(data));
+    const phone = String(data.phone || "");
+    return { phone: phone.startsWith("+") ? phone : ("+" + phone), orderId: String(data.id || "") };
+  }
+  throw new Error("Unknown provider type");
+}
+
+async function providerCheckSMS(provider, orderId) {
+  if (provider.provider_type === "smspool") {
+    const data = await callProvider(provider, "/sms/check", { orderid: orderId });
+    return { sms: data.sms || null, status: String(data.status || "pending") };
+  } else if (provider.provider_type === "5sim") {
+    const data = await callProvider(provider, "/user/check/" + encodeURIComponent(orderId));
+    const smsList = data.sms || [];
+    const latest = smsList[smsList.length - 1];
+    return { sms: latest ? String(latest.text || "") : null, status: String(data.status || "pending") };
+  }
+  return { sms: null, status: "pending" };
+}
+
+async function providerRefund(provider, orderId) {
+  try {
+    if (provider.provider_type === "smspool") {
+      return await callProvider(provider, "/sms/refund", { orderid: orderId });
+    } else if (provider.provider_type === "5sim") {
+      return await callProvider(provider, "/user/cancel/" + encodeURIComponent(orderId));
+    }
+  } catch(e) { console.error("Provider refund error:", e.message); }
+  return null;
+}
+
+async function pollProviderSessions() {
+  try {
+    const provider = await getActiveProvider();
+    if (!provider) return;
+    const sessions = await pool.query(
+      "SELECT s.id, s.user_id, s.number_id, s.provider, s.provider_order_id FROM sessions s WHERE s.expires_at > NOW() AND s.provider IS NOT NULL AND s.provider_order_id IS NOT NULL"
+    );
+    for (const sess of sessions.rows) {
+      try {
+        const result = await providerCheckSMS(provider, sess.provider_order_id);
+        if (result.sms) {
+          const existing = await pool.query(
+            "SELECT id FROM messages WHERE number_id = $1 AND text = $2 LIMIT 1",
+            [sess.number_id, result.sms]
+          );
+          if (!existing.rows.length) {
+            const otp = extractOTP(result.sms);
+            await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [sess.number_id, "SMS", result.sms, otp]);
+            broadcast({ type: "message", phoneNumber: "SMS", text: result.sms, otp: otp });
+            console.log("Provider SMS received for session", sess.id, "otp:", otp);
+          }
+        }
+      } catch(e) { console.error("Poll session", sess.id, "error:", e.message); }
+    }
+  } catch(e) { console.error("pollProviderSessions error:", e.message); }
+}
+// ============ END PROVIDER ADAPTERS ============
+
 function broadcast(message) {
   const payload = JSON.stringify(message);
   for (const socket of sockets) {
@@ -155,6 +293,9 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS announcements (id SERIAL PRIMARY KEY, title TEXT NOT NULL, body TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS promo_ads (id SERIAL PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, description TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, sort_order INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS sms_providers (id SERIAL PRIMARY KEY, name TEXT NOT NULL, provider_type TEXT NOT NULL DEFAULT 'smspool', api_key TEXT, api_secret TEXT, api_url TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS provider TEXT`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS provider TEXT`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS provider_order_id TEXT`);
   await pool.query(`CREATE TABLE IF NOT EXISTS escrow_transactions (id TEXT PRIMARY KEY, listing_id BIGINT REFERENCES p2p_listings(id) ON DELETE SET NULL, buyer_id INTEGER REFERENCES users(id) ON DELETE SET NULL, seller_id INTEGER REFERENCES users(id) ON DELETE SET NULL, amount_sats INTEGER NOT NULL, seller_amount INTEGER NOT NULL, commission INTEGER NOT NULL, invoice_id TEXT, payment_request TEXT, status TEXT NOT NULL DEFAULT 'pending', dispute_reason TEXT, created_at BIGINT NOT NULL, paid_at BIGINT, released_at BIGINT)`);
   console.log("Database initialized.");
   setInterval(async function() {
@@ -293,6 +434,7 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div id="tab-rent">
       <div id="qr"></div>
+      <div id="provider-box" class="box" style="display:none;"></div>
       <div id="numbers" class="box"><p class="muted" style="font-size:0.9em;">Buy a number to receive a one-time OTP verification code (Telegram, WhatsApp, etc.).</p>Login or register to load numbers.</div>
       <div id="sessions" class="box"><h3>My active numbers</h3></div>
       <div id="otp" class="box"><h3>OTP Inbox</h3></div>
@@ -444,7 +586,14 @@ const HTML = `<!DOCTYPE html>
     var COUNTRIES=["Albania","Argentina","Australia","Austria","Bangladesh","Belarus","Belgium","Bosnia","Brazil","Bulgaria","Canada","Chile","China","Colombia","Croatia","Czech Republic","Denmark","Egypt","Estonia","Finland","France","Germany","Greece","Hong Kong","Hungary","India","Indonesia","Ireland","Israel","Italy","Japan","Kazakhstan","Kenya","Kosovo","Latvia","Lithuania","Malaysia","Mexico","Montenegro","Morocco","Netherlands","New Zealand","Nigeria","North Macedonia","Norway","Pakistan","Peru","Philippines","Poland","Portugal","Romania","Russia","Saudi Arabia","Serbia","Singapore","Slovakia","Slovenia","South Africa","South Korea","Spain","Sweden","Switzerland","Taiwan","Thailand","Turkey","UAE","UK","Ukraine","USA","Vietnam","Other"];
     var SERVICES=["Telegram","WhatsApp","Viber","Signal","Instagram","Facebook","Messenger","Twitter / X","TikTok","Snapchat","YouTube","Twitch","Discord","LinkedIn","Pinterest","Reddit","Clubhouse","BeReal","Threads","Google","Apple","Microsoft","Amazon","Netflix","Spotify","Disney+","HBO Max","Hulu","Prime Video","Steam","Twitch","Uber","Uber Eats","Airbnb","Booking.com","Fiverr","Upwork","Etsy","eBay","Shopify","Tinder","Bumble","Hinge","Badoo","OkCupid","PayPal","Cash App","Venmo","Wise","Revolut","Skrill","Neteller","N26","Monzo","Coinbase","Binance","Bybit","OKX","KuCoin","Kraken","Bitget","MEXC","Gate.io","Nexo","Crypto.com","Dropbox","GitHub","Slack","Zoom","Teams","Notion","Trello","Figma","ChatGPT","Other"];
     var _numsData={};
-    async function loadNumbers(){if(!token)return;var r=await fetch("/numbers",{headers:authH()});if(!r.ok)return setStatus("Login again.",true);var data=await r.json();_numsData={};var h="<h3>Available numbers</h3>";if(!data.length)h+="<p class='muted'>No numbers available.</p>";data.forEach(function(i){_numsData[i.id]={phone:i.phone_number,sats:i.price_sats};h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong><br><span class='ln-yellow' style='font-size:0.9em;'>&#9889; "+esc(i.price_sats)+" sats</span></span><button onclick='showBuyPanel("+i.id+")'>&#9889; Buy</button></div>";});document.getElementById("numbers").innerHTML=h;}
+    var _providerCatalog=null;
+    var _providerBuyState={country:"",service:"",priceSats:0};
+    async function loadProviderCatalog(){if(!token)return;try{var r=await fetch("/api/provider/catalog",{headers:authH()});if(!r.ok)return;var cat=await r.json();_providerCatalog=cat;renderProviderUI();}catch(e){console.error("Provider catalog err:",e);}}
+    function renderProviderUI(){var box=document.getElementById("provider-box");if(!box)return;var cat=_providerCatalog;if(!cat||!cat.active){box.style.display="none";return;}box.style.display="block";var cOpts=cat.countries.map(function(c){return"<option value='"+esc(c.id)+"'>"+esc(c.name)+"</option>";}).join("");box.innerHTML="<h3>&#127760; Get a Number</h3><p class='muted' style='font-size:0.85em;margin-bottom:14px;'>Powered by "+esc(cat.type)+". Number assigned instantly after payment.</p><div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;'><div><label class='muted' style='font-size:0.85em;'>Country</label><br><select id='prov-country' onchange='onProviderCountryChange()' style='width:100%;margin-top:4px;'><option value=''>-- Select country --</option>"+cOpts+"</select></div><div><label class='muted' style='font-size:0.85em;'>Service</label><br><select id='prov-service' onchange='onProviderServiceChange()' style='width:100%;margin-top:4px;'><option value=''>-- Select service --</option></select></div></div><div id='prov-price-box' style='display:none;margin-bottom:12px;padding:10px;background:#0d1520;border-radius:10px;border:1px solid #1e2d40;'><span class='muted' style='font-size:0.85em;'>Price: </span><strong class='ln-yellow' id='prov-price-val'>-- sats</strong><span class='muted' id='prov-avail' style='font-size:0.82em;margin-left:10px;'></span></div><button id='prov-buy-btn' onclick='buyProviderNum()' style='width:100%;padding:14px;font-size:1.05em;display:none;'>&#9889; Get Number via Lightning</button><div id='prov-status' class='muted' style='font-size:0.85em;margin-top:8px;'></div>";}
+    async function onProviderCountryChange(){var country=document.getElementById("prov-country")?document.getElementById("prov-country").value:"";var svcSel=document.getElementById("prov-service");if(!svcSel||!country)return;svcSel.innerHTML="<option>Loading...</option>";var pb=document.getElementById("prov-price-box");var bb=document.getElementById("prov-buy-btn");if(pb)pb.style.display="none";if(bb)bb.style.display="none";try{var r=await fetch("/api/provider/catalog?country="+encodeURIComponent(country),{headers:authH()});var cat=await r.json();var sOpts=(cat.services||[]).map(function(s){return"<option value='"+esc(s.id)+"'>"+esc(s.name)+(s.available?" ("+s.available+")":"")+"</option>";}).join("");svcSel.innerHTML="<option value=''>-- Select service --</option>"+sOpts;}catch(e){svcSel.innerHTML="<option value=''>Error loading</option>";}  _providerBuyState.country=country;_providerBuyState.service="";_providerBuyState.priceSats=0;}
+    async function onProviderServiceChange(){var country=document.getElementById("prov-country")?document.getElementById("prov-country").value:"";var service=document.getElementById("prov-service")?document.getElementById("prov-service").value:"";if(!country||!service)return;_providerBuyState.country=country;_providerBuyState.service=service;_providerBuyState.priceSats=0;var priceBox=document.getElementById("prov-price-box");var priceVal=document.getElementById("prov-price-val");var availEl=document.getElementById("prov-avail");var buyBtn=document.getElementById("prov-buy-btn");if(priceBox)priceBox.style.display="block";if(priceVal)priceVal.textContent="Loading...";if(buyBtn)buyBtn.style.display="none";try{var r=await fetch("/api/provider/price?country="+encodeURIComponent(country)+"&service="+encodeURIComponent(service),{headers:authH()});var pd=await r.json();_providerBuyState.priceSats=pd.sats||0;if(priceVal)priceVal.textContent=esc(String(pd.sats))+" sats";if(availEl)availEl.textContent=pd.available?"("+pd.available+" available)":"";if(buyBtn&&pd.sats>0)buyBtn.style.display="block";}catch(e){if(priceVal)priceVal.textContent="Error";}}
+    async function buyProviderNum(){var country=_providerBuyState.country;var service=_providerBuyState.service;var priceSats=_providerBuyState.priceSats;if(!country||!service||!priceSats)return setStatus("Select country, service and wait for price.",true);setStatus("Creating invoice...",false);var btn=document.getElementById("prov-buy-btn");if(btn)btn.disabled=true;var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({mode:"provider",country:country,service:service,priceSats:priceSats})});var inv=await r.json().catch(function(){return{error:"Error"};});if(btn)btn.disabled=false;if(!r.ok)return setStatus(inv.error||"Error.",true);if(inv.paid_from_wallet){setStatus("Paid from wallet! Assigning your number...",false);loadWalletBalance();setTimeout(function(){loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});},2000);return;}setStatus("Scan QR to pay. Number assigned after payment.",false);_lightningInvoice=inv.lightning_invoice||"";if(_lightningInvoice&&typeof window.webln!=="undefined"){try{await window.webln.enable();await window.webln.sendPayment(_lightningInvoice);setStatus("Payment sent! Assigning your number...",false);clearQR();startPolling();return;}catch(we){setStatus("WebLN cancelled, use QR below.",false);}}var lnHtml=_lightningInvoice?"<textarea style='width:100%;box-sizing:border-box;background:#0d1520;color:#fbbf24;border:1px solid #2a3a50;border-radius:10px;padding:10px;font-size:0.75em;margin-top:10px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:6px;'>Copy Invoice</button>":"";var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;color:#ff8040;'>Open in Wallet App</a>":"";document.getElementById("qr").innerHTML="<div class='box'><h3>&#9889; Scan to Pay</h3><p class='muted' style='font-size:0.9em;'>"+esc(service)+" &bull; "+esc(country)+"</p><p>Amount: <strong class='ln-yellow'>"+esc(String(priceSats))+" sats</strong></p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"<p class='muted' style='font-size:0.85em;margin-top:10px;'>Number will be assigned after payment confirmation.</p><button onclick='clearQR()' class='btn-secondary' style='width:100%;margin-top:8px;padding:10px;'>Cancel</button></div>";document.getElementById("qr").scrollIntoView({behavior:"smooth"});startPolling();}
+    async function loadNumbers(){if(!token)return;loadProviderCatalog();var r=await fetch("/numbers",{headers:authH()});if(!r.ok)return setStatus("Login again.",true);var data=await r.json();_numsData={};if(!data.length){document.getElementById("numbers").innerHTML="<p class='muted' style='font-size:0.9em;'>No static numbers available. Use the form above to get one from the provider.</p>";return;}var h="<h3>Available numbers</h3>";data.forEach(function(i){_numsData[i.id]={phone:i.phone_number,sats:i.price_sats};h+="<div class='box row'><span><strong>"+esc(i.phone_number)+"</strong><br><span class='ln-yellow' style='font-size:0.9em;'>&#9889; "+esc(i.price_sats)+" sats</span></span><button onclick='showBuyPanel("+i.id+")'>&#9889; Buy</button></div>";});document.getElementById("numbers").innerHTML=h;}
     function showBuyPanel(id){var num=_numsData[id]||{};var phone=num.phone||"";var sats=num.sats||"";var cOpts=COUNTRIES.map(function(c){return"<option>"+esc(c)+"</option>";}).join("");var sOpts=SERVICES.map(function(s){return"<option>"+esc(s)+"</option>";}).join("");document.getElementById("qr").innerHTML="<div class='box'><h3>&#9889; "+esc(phone)+"</h3><div class='row' style='gap:12px;margin-bottom:14px;'><div style='flex:1'><label class='muted' style='font-size:0.85em;'>Country</label><br><select id='selCountry' style='width:100%;margin-top:4px;'>"+cOpts+"</select></div><div style='flex:1'><label class='muted' style='font-size:0.85em;'>Service</label><br><select id='selService' style='width:100%;margin-top:4px;'>"+sOpts+"</select></div></div><p style='font-size:1em;margin:0 0 14px;'>Price: <strong class='ln-yellow'>&#9889; "+esc(sats)+" sats</strong></p><button onclick='buyNum("+id+")' style='width:100%;padding:13px;font-size:1.05em;'>&#9889; Pay via Lightning</button><br><button onclick='clearQR()' class='btn-secondary' style='width:100%;margin-top:6px;padding:10px;'>Cancel</button></div>";document.getElementById("qr").scrollIntoView({behavior:"smooth"});}
     var _lightningInvoice = "";
     var _pollTimer = null;
@@ -460,7 +609,7 @@ const HTML = `<!DOCTYPE html>
     var wsP=location.protocol==="https:"?"wss://":"ws://";
     var ws=new WebSocket(wsP+location.host);
     ws.onopen=function(){console.log("WS connected");};
-    ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==="session_activated"){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();loadMessages();loadWalletBalance();setTimeout(function(){var el=document.getElementById("sessions");if(el)el.scrollIntoView({behavior:"smooth"});},300);}else if(m.type==="message"){loadMessages();if(m.otp){showNotif("SMSNero: New OTP arrived","Code: "+m.otp);}}else if(m.type==="wallet_topped_up"){loadWalletBalance();setStatus("Wallet topped up!",false);document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";}else if(m.type==="send_credit_activated"){checkSendCredit();setStatus("Send credit activated!",false);}else if(m.type==="escrow_paid"){setStatus("Escrow payment confirmed! The seller has been notified.",false);loadEscrowTxs();showNotif("SMSNero: Escrow Paid","Your payment is held in escrow. Confirm receipt to release.");}else if(m.type==="escrow_released"){setStatus("Escrow released! Seller received payment.",false);loadEscrowTxs();loadWalletBalance();if(role==="admin")loadAdminEscrow();}else if(m.type==="escrow_disputed"){setStatus("Escrow dispute opened. Admin will review.",false);loadEscrowTxs();if(role==="admin"){loadAdminEscrow();showNotif("SMSNero Admin","New escrow dispute opened!");}}else if(m.type==="escrow_refunded"){setStatus("Escrow refunded by admin.",false);loadEscrowTxs();loadWalletBalance();}}catch(err){}};
+    ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==="session_activated"){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();loadMessages();loadWalletBalance();setTimeout(function(){var el=document.getElementById("sessions");if(el)el.scrollIntoView({behavior:"smooth"});},300);}else if(m.type==="message"){loadMessages();if(m.otp){showNotif("SMSNero: New OTP arrived","Code: "+m.otp);}}else if(m.type==="wallet_topped_up"){loadWalletBalance();setStatus("Wallet topped up!",false);document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";}else if(m.type==="send_credit_activated"){checkSendCredit();setStatus("Send credit activated!",false);}else if(m.type==="escrow_paid"){setStatus("Escrow payment confirmed! The seller has been notified.",false);loadEscrowTxs();showNotif("SMSNero: Escrow Paid","Your payment is held in escrow. Confirm receipt to release.");}else if(m.type==="escrow_released"){setStatus("Escrow released! Seller received payment.",false);loadEscrowTxs();loadWalletBalance();if(role==="admin")loadAdminEscrow();}else if(m.type==="escrow_disputed"){setStatus("Escrow dispute opened. Admin will review.",false);loadEscrowTxs();if(role==="admin"){loadAdminEscrow();showNotif("SMSNero Admin","New escrow dispute opened!");}}else if(m.type==="escrow_refunded"){setStatus("Escrow refunded by admin.",false);loadEscrowTxs();loadWalletBalance();}else if(m.type==="provider_buy_error"){setStatus("Provider error: "+m.error,true);}}catch(err){}};
     ws.onerror=function(){console.warn("WS error");};
     setInterval(function(){if(token&&role!=="admin")loadSessions();},60000);
     applyTheme(_themeIdx);
@@ -615,6 +764,68 @@ app.post("/create-invoice", auth, wrap(async function(req, res) {
   if (!SWISS_API_KEY || !SWISS_SECRET_KEY) {
     return res.status(503).json({ error: "Payment not configured. Set SWISS_API_KEY and SWISS_SECRET_KEY." });
   }
+
+  // PROVIDER MODE: buy number dynamically from SMSPool/5sim
+  if (req.body.mode === "provider") {
+    const provider = await getActiveProvider();
+    if (!provider) return res.status(503).json({ error: "No SMS provider configured. Contact admin." });
+    const country = String(req.body.country || "").trim();
+    const service = String(req.body.service || "").trim();
+    const priceSats = Number(req.body.priceSats);
+    if (!country || !service) return res.status(400).json({ error: "Country and service are required" });
+    if (!Number.isInteger(priceSats) || priceSats <= 0) return res.status(400).json({ error: "Invalid price" });
+    const appUrl = process.env.APP_URL || ("https://" + (process.env.RENDER_EXTERNAL_HOSTNAME || "smsnero.onrender.com"));
+    // Create invoice WITHOUT number_id (provider mode: number assigned on payment)
+    const invResult = await pool.query(
+      "INSERT INTO invoices (user_id, number_id, amount_sats, country, service, provider) VALUES ($1, NULL, $2, $3, $4, $5) RETURNING id",
+      [req.user.id, priceSats, country, service, provider.provider_type]
+    );
+    const invoiceId = invResult.rows[0].id;
+    const payload = { title: "SMSNero", description: service + " - " + country, amount: priceSats, unit: "sat", onChain: false, delay: 10, webhook: { url: appUrl + "/webhook" } };
+    const response = await fetch(SWISS_API_URL + "/checkout", { method: "POST", headers: { "Content-Type": "application/json", "api-key": SWISS_API_KEY }, body: JSON.stringify(payload) });
+    const rawText = await response.text().catch(function() { return ""; });
+    let data = {};
+    try { data = JSON.parse(rawText); } catch(e) {}
+    if (!response.ok) return res.status(502).json({ error: "Payment error: " + (data.message || data.error || rawText.slice(0, 200)) });
+    await pool.query("UPDATE invoices SET provider_payment_id=$1, checkout_url=$2 WHERE id=$3", [data.id || null, data.checkoutUrl || data.url || null, invoiceId]);
+    const lightningInvoice = data.pr || data.paymentRequest || null;
+    const qrSource = lightningInvoice || data.checkoutUrl || data.url;
+    if (!qrSource) return res.status(502).json({ error: "No payment URL returned" });
+    const qr = await QRCode.toDataURL(qrSource);
+    // Try wallet payment
+    const wr = await pool.query("SELECT balance_sats FROM wallets WHERE user_id = $1", [req.user.id]);
+    const bal = wr.rows[0] ? wr.rows[0].balance_sats : 0;
+    if (bal >= priceSats) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("UPDATE wallets SET balance_sats = balance_sats - $1 WHERE user_id = $2", [priceSats, req.user.id]);
+        await client.query("UPDATE invoices SET status='paid' WHERE id=$1", [invoiceId]);
+        await client.query("COMMIT");
+        // Buy number from provider immediately
+        let phone, orderId;
+        try {
+          const bought = await providerBuyNumber(provider, country, service);
+          phone = bought.phone; orderId = bought.orderId;
+        } catch(be) {
+          await client.query("ROLLBACK").catch(function(){});
+          const client2 = await pool.connect();
+          await client2.query("UPDATE wallets SET balance_sats = balance_sats + $1 WHERE user_id = $2", [priceSats, req.user.id]).catch(function(){});
+          client2.release();
+          return res.status(502).json({ error: "Provider error: " + be.message });
+        }
+        const nr = await pool.query("INSERT INTO numbers (phone_number, price_sats, active) VALUES ($1, $2, TRUE) ON CONFLICT (phone_number) DO UPDATE SET active=TRUE, price_sats=EXCLUDED.price_sats RETURNING id", [phone, priceSats]);
+        const numberId = nr.rows[0].id;
+        await pool.query("UPDATE invoices SET number_id=$1 WHERE id=$2", [numberId, invoiceId]);
+        const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
+        await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service, provider, provider_order_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING", [req.user.id, numberId, invoiceId, expiresAt, country, service, provider.provider_type, orderId]);
+        broadcast({ type: "session_activated", userId: req.user.id, numberId, phoneNumber: phone });
+        return res.json({ paid_from_wallet: true, amount_sats: priceSats, phone_number: phone });
+      } catch(e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+    }
+    return res.json({ invoice_id: invoiceId, amount_sats: priceSats, qr: qr, lightning_invoice: lightningInvoice, checkout_url: data.checkoutUrl || data.url, mode: "provider" });
+  }
+
   let number, p2pListingId = null, sendNumberId = null;
   if (req.body.sendNumberId) {
     const sid = Number(req.body.sendNumberId);
@@ -721,6 +932,25 @@ app.post("/webhook", wrap(async function(req, res) {
     if (invoice.send_number_id) {
       await pool.query("INSERT INTO send_credits (user_id, send_number_id, invoice_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.send_number_id, invoice.id]);
       broadcast({ type: "send_credit_activated", userId: invoice.user_id });
+    } else if (invoice.provider && !invoice.number_id) {
+      // PROVIDER MODE: buy number from provider on payment
+      const provider = await getActiveProvider();
+      if (provider) {
+        try {
+          const bought = await providerBuyNumber(provider, invoice.country, invoice.service);
+          const nr = await pool.query("INSERT INTO numbers (phone_number, price_sats, active) VALUES ($1, $2, TRUE) ON CONFLICT (phone_number) DO UPDATE SET active=TRUE, price_sats=EXCLUDED.price_sats RETURNING id", [bought.phone, invoice.amount_sats]);
+          const numberId = nr.rows[0].id;
+          await pool.query("UPDATE invoices SET number_id=$1 WHERE id=$2", [numberId, invoice.id]);
+          const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
+          await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service, provider, provider_order_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+            [invoice.user_id, numberId, invoice.id, expiresAt, invoice.country || null, invoice.service || null, provider.provider_type, bought.orderId]);
+          broadcast({ type: "session_activated", userId: invoice.user_id, numberId, phoneNumber: bought.phone });
+          console.log("Provider number bought on payment:", bought.phone, "orderId:", bought.orderId);
+        } catch(pe) {
+          console.error("Provider buy error on webhook payment:", pe.message);
+          broadcast({ type: "provider_buy_error", userId: invoice.user_id, error: pe.message });
+        }
+      }
     } else {
       const expiresAt = new Date(Date.now() + SESSION_DURATION_HOURS * 3600000);
       await pool.query("INSERT INTO sessions (user_id, number_id, invoice_id, expires_at, country, service) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING", [invoice.user_id, invoice.number_id, invoice.id, expiresAt, invoice.country || null, invoice.service || null]);
@@ -892,7 +1122,7 @@ app.post("/refund-session", auth, wrap(async function(req, res) {
   const sessionId = Number(req.body.sessionId);
   if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
   const sRow = await pool.query(
-    "SELECT s.id, s.user_id, s.number_id, s.created_at, n.price_sats FROM sessions s JOIN numbers n ON n.id = s.number_id WHERE s.id = $1 AND s.user_id = $2",
+    "SELECT s.id, s.user_id, s.number_id, s.created_at, s.provider, s.provider_order_id, n.price_sats FROM sessions s JOIN numbers n ON n.id = s.number_id WHERE s.id = $1 AND s.user_id = $2",
     [sessionId, req.user.id]
   );
   if (!sRow.rows.length) return res.status(404).json({ error: "Session not found" });
@@ -914,6 +1144,15 @@ app.post("/refund-session", auth, wrap(async function(req, res) {
     await client.query("INSERT INTO wallets (user_id, balance_sats) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET balance_sats = wallets.balance_sats + EXCLUDED.balance_sats", [req.user.id, refundSats]);
     await client.query("COMMIT");
     broadcast({ type: "wallet_topped_up", userId: req.user.id, amount: refundSats });
+    // Cancel with provider if applicable
+    if (sess.provider && sess.provider_order_id) {
+      const provider = await getActiveProvider();
+      if (provider) {
+        providerRefund(provider, sess.provider_order_id).then(function(r) {
+          console.log("Provider refund result for", sess.provider_order_id, ":", JSON.stringify(r));
+        });
+      }
+    }
     res.json({ refunded_sats: refundSats });
   } catch(e) { await client.query("ROLLBACK"); throw e; }
   finally { client.release(); }
@@ -1272,6 +1511,40 @@ app.post("/api/withdraw", auth, wrap(async function(req, res) {
   }
 }));
 
+// PROVIDER CATALOG: countries, services, price (public for logged-in users)
+app.get("/api/provider/catalog", auth, wrap(async function(req, res) {
+  const provider = await getActiveProvider();
+  if (!provider) return res.json({ active: false, type: null, countries: [], services: [] });
+  try {
+    const countries = await providerGetCountries(provider);
+    const country = req.query.country || null;
+    const services = country ? await providerGetServices(provider, country) : [];
+    return res.json({ active: true, type: provider.provider_type, btcRate: _btcRate, countries: countries.slice(0, 300), services: services.slice(0, 500) });
+  } catch(e) {
+    console.error("Provider catalog error:", e.message);
+    return res.status(502).json({ active: false, type: provider.provider_type, error: e.message, countries: [], services: [] });
+  }
+}));
+
+app.get("/api/provider/price", auth, wrap(async function(req, res) {
+  const provider = await getActiveProvider();
+  if (!provider) return res.json({ sats: 0, usd_cents: 0 });
+  const { country, service } = req.query;
+  if (!country || !service) return res.json({ sats: 0, usd_cents: 0 });
+  try {
+    const services = await providerGetServices(provider, country);
+    const svc = services.find(function(s) { return s.id === service || s.name.toLowerCase() === String(service).toLowerCase(); });
+    const cents = svc ? (svc.price_cents || 50) : 50;
+    const markup = 1.3;
+    const finalCents = Math.ceil(cents * markup);
+    const sats = usdCentsToSats(finalCents);
+    return res.json({ sats: sats, usd_cents: finalCents, raw_cents: cents, btcRate: _btcRate, available: svc ? (svc.available || 0) : 0 });
+  } catch(e) {
+    console.error("Provider price error:", e.message);
+    return res.json({ sats: usdCentsToSats(65), usd_cents: 65, btcRate: _btcRate });
+  }
+}));
+
 app.get("/admin/sms-providers", auth, adminOnly, wrap(async function(req, res) {
   const result = await pool.query("SELECT id, name, provider_type, api_url, is_active, notes, created_at FROM sms_providers ORDER BY id DESC");
   res.json(result.rows);
@@ -1305,6 +1578,7 @@ wss.on("connection", function(socket) {
 });
 
 initDb().then(function() {
+  setInterval(pollProviderSessions, 12000);
   server.listen(PORT, function() {
     console.log("SMSNero running on port " + PORT);
   });
