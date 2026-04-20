@@ -740,40 +740,43 @@ app.post("/webhook", wrap(async function(req, res) {
 
 app.post("/test-sms", auth, adminOnly, wrap(async function(req, res) {
   const { number, text } = req.body || {};
-  if (!number || !text) return res.status(400).json({ error: "Need number and text" });
-  const numRes = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [number]);
-  if (!numRes.rows.length) return res.status(404).json({ error: "Number not found" });
-  const numberId = numRes.rows[0].id;
+  if (!text) return res.status(400).json({ error: "Need text" });
+  let numberId = null;
+  if (number) {
+    const numRes = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [number]);
+    if (numRes.rows.length) numberId = numRes.rows[0].id;
+  }
+  if (!numberId) {
+    const activeRes = await pool.query("SELECT number_id FROM sessions WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1");
+    if (activeRes.rows.length) numberId = activeRes.rows[0].number_id;
+  }
   const otp = extractOTP(text);
   await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, "+000test", text, otp]);
   broadcast({ type: "message", phoneNumber: "+000test", text: text, otp: otp });
-  return res.json({ ok: true, otp: otp });
+  console.log("Test SMS injected: text:", text, "otp:", otp, "number_id:", numberId);
+  return res.json({ ok: true, otp: otp, number_id: numberId });
 }));
 
-app.post("/sms-webhook", wrap(async function(req, res) {
+async function handleSmsWebhook(req, res) {
   const body = req.body || {};
   console.log("=== SMS WEBHOOK ===");
-  console.log("Query:", JSON.stringify(req.query));
+  console.log("Method:", req.method, "Query:", JSON.stringify(req.query));
   console.log("Body:", JSON.stringify(body));
   console.log("Headers content-type:", req.headers["content-type"]);
-  const sender = String(req.query.from || req.query.sender || req.query.originator || body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
-  const text = String(req.query.text || req.query.body || req.query.message || req.query.sms || body.text || body.message || body.body || body.sms || body.content || "").trim();
-  console.log("Parsed sender:", sender, "text:", text);
+  const sender = String(req.query.from || req.query.sender || req.query.originator || req.query.msisdn || body.from || body.phone || body.sender || body.originator || body.msisdn || "").trim();
+  const text = String(req.query.text || req.query.body || req.query.message || req.query.sms || req.query.msg || body.text || body.message || body.body || body.sms || body.content || body.msg || "").trim();
+  const toField = String(req.query.to || req.query.number || req.query.inbound_number || body.to || body.recipient || body.number || body.inbound_number || "").trim();
+  console.log("Parsed sender:", sender, "text:", text, "to:", toField);
   if (!sender || !text) {
     console.log("SMS webhook missing fields");
     return res.status(400).json({ error: "Missing sender and text fields", received: { query: req.query, body: body } });
   }
-  // Find which of our rented numbers received this SMS:
-  // 1. Check explicit "to" field in body or query param
-  // 2. Fallback: use any currently active rented number
-  const toField = String(req.query.to || req.query.number || body.to || body.recipient || body.number || "").trim();
   let numberId = null;
   if (toField) {
     const toResult = await pool.query("SELECT id FROM numbers WHERE phone_number = $1 LIMIT 1", [toField]);
     if (toResult.rows.length) numberId = toResult.rows[0].id;
   }
   if (!numberId) {
-    // Fallback: assign to the most recently active rented number
     const activeResult = await pool.query("SELECT number_id FROM sessions WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1");
     if (activeResult.rows.length) numberId = activeResult.rows[0].number_id;
   }
@@ -782,6 +785,29 @@ app.post("/sms-webhook", wrap(async function(req, res) {
   await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, sender, text, otp]);
   broadcast({ type: "message", phoneNumber: sender, text: text, otp: otp });
   return res.sendStatus(200);
+}
+app.post("/sms-webhook", wrap(handleSmsWebhook));
+app.get("/sms-webhook", wrap(handleSmsWebhook));
+
+// Admin: test SMS delivery (simulate incoming SMS)
+app.post("/admin/test-sms", auth, adminOnly, wrap(async function(req, res) {
+  const text = String(req.body.text || "Your OTP code is 999888. Valid for 5 minutes.").trim();
+  const from = String(req.body.from || "+10000000000").trim();
+  const to = String(req.body.to || "").trim();
+  let numberId = null;
+  if (to) {
+    const r = await pool.query("SELECT id FROM numbers WHERE phone_number=$1 LIMIT 1", [to]);
+    if (r.rows.length) numberId = r.rows[0].id;
+  }
+  if (!numberId) {
+    const r = await pool.query("SELECT number_id FROM sessions WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1");
+    if (r.rows.length) numberId = r.rows[0].number_id;
+  }
+  const otp = extractOTP(text);
+  await pool.query("INSERT INTO messages (number_id, phone_number, text, otp) VALUES ($1, $2, $3, $4)", [numberId, from, text, otp]);
+  broadcast({ type: "message", phoneNumber: from, text: text, otp: otp });
+  console.log("TEST SMS injected: from", from, "text:", text, "otp:", otp, "number_id:", numberId);
+  return res.json({ ok: true, otp: otp, number_id: numberId, message: "Test SMS injected and broadcast to all connected clients." });
 }));
 
 // P2P: submit a listing
