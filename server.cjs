@@ -300,9 +300,9 @@ async function initDb() {
   console.log("Database initialized.");
   setInterval(async function() {
     try {
-      await pool.query("DELETE FROM messages WHERE created_at < NOW() - INTERVAL '1 minute' AND (number_id IS NULL OR number_id NOT IN (SELECT number_id FROM sessions WHERE expires_at > NOW()))");
+      await pool.query("DELETE FROM messages WHERE created_at < NOW() - INTERVAL '1 minute'");
     } catch(e) { console.error("OTP cleanup error:", e.message); }
-  }, 60000);
+  }, 30000);
   setInterval(async function() {
     try {
       const cutoff = Date.now() - 30 * 60 * 1000;
@@ -421,9 +421,12 @@ const HTML = `<!DOCTYPE html>
         </div>
       </div>
       <div id="referral-bar" style="display:none;width:100%;margin-top:10px;padding-top:10px;border-top:1px solid #1e2d40;">
-        <span class="muted" style="font-size:0.85em;">&#127381; Referral code:</span>
-        <input id="ref-code" placeholder="Enter code" style="width:130px;font-size:0.88em;padding:6px 10px;">
-        <button onclick="useReferral()" style="padding:6px 14px;font-size:0.88em;">Apply</button>
+        <div style="margin-bottom:8px;" id="available-ref-codes-box"></div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span class="muted" style="font-size:0.85em;">&#127381; Referral code:</span>
+          <input id="ref-code" placeholder="Enter code" style="width:130px;font-size:0.88em;padding:6px 10px;">
+          <button onclick="useReferral()" style="padding:6px 14px;font-size:0.88em;">Apply</button>
+        </div>
       </div>
     </div>
     <div id="admin" class="box" style="display:none"></div>
@@ -512,8 +515,10 @@ const HTML = `<!DOCTYPE html>
     function requestNotifPerm(){if(typeof Notification!=="undefined"&&Notification.permission==="default")Notification.requestPermission();}
     function showNotif(title,body){if(typeof Notification!=="undefined"&&Notification.permission==="granted"){try{new Notification(title,{body:body});}catch(e){}}}
     function countdown(expiresAt){var ms=new Date(expiresAt)-Date.now();if(ms<=0)return"Expired";var h=Math.floor(ms/3600000);var m=Math.floor((ms%3600000)/60000);return h>0?h+"h "+m+"m left":m+"m left";}
-    async function loadWalletBalance(){var bar=document.getElementById("wallet-bar");var refBar=document.getElementById("referral-bar");if(!token||role==="admin"){bar.style.display="none";if(refBar)refBar.style.display="none";return;}var r=await fetch("/wallet/balance",{headers:authH()});if(!r.ok)return;var d=await r.json();document.getElementById("wallet-bal").textContent=d.balance_sats;bar.style.display="flex";if(refBar)refBar.style.display="block";}
-    async function useReferral(){var code=document.getElementById("ref-code").value.trim();if(!code)return setStatus("Enter a referral code.",true);var r=await fetch("/use-referral",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({code:code})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Invalid code.",true);setStatus("Code applied! "+d.bonus_sats+" sats added to your wallet.",false);document.getElementById("ref-code").value="";loadWalletBalance();}
+    async function loadAvailableRefCodes(){var box=document.getElementById("available-ref-codes-box");if(!box)return;try{var r=await fetch("/public/referral-codes");if(!r.ok)return;var data=await r.json();if(!data||!data.length){box.innerHTML="";return;}var h="<div style='font-size:0.82em;color:#94a3b8;margin-bottom:4px;'>&#127381; Active promo codes:</div><div style='display:flex;flex-wrap:wrap;gap:6px;'>";data.forEach(function(i){h+="<button onclick='applyRefCode(\""+esc(i.code)+"\")' style='padding:5px 12px;font-size:0.82em;background:linear-gradient(135deg,#1a1500,#2a1f00);border:1px solid #fbbf24;color:#fbbf24;border-radius:8px;cursor:pointer;display:flex;flex-direction:column;align-items:flex-start;gap:2px;'><strong>"+esc(i.code)+"</strong><span style='color:#4ade80;font-size:0.88em;'>+"+esc(String(i.bonus_sats))+" sats</span>"+(i.description?"<span style='color:#94a3b8;font-size:0.8em;'>"+esc(i.description)+"</span>":"")+"</button>";});h+="</div>";box.innerHTML=h;}catch(e){box.innerHTML="";}}
+    function applyRefCode(code){var inp=document.getElementById("ref-code");if(inp){inp.value=code;useReferral();}}
+    async function loadWalletBalance(){var bar=document.getElementById("wallet-bar");var refBar=document.getElementById("referral-bar");if(!token||role==="admin"){bar.style.display="none";if(refBar)refBar.style.display="none";return;}var r=await fetch("/wallet/balance",{headers:authH()});if(!r.ok)return;var d=await r.json();document.getElementById("wallet-bal").textContent=d.balance_sats;bar.style.display="flex";if(refBar){refBar.style.display="block";loadAvailableRefCodes();}}
+    async function useReferral(){var code=document.getElementById("ref-code").value.trim().toUpperCase();if(!code)return setStatus("Enter a referral code.",true);var r=await fetch("/use-referral",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({code:code})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Invalid code.",true);setStatus("Code applied! +"+d.bonus_sats+" sats added to your wallet.",false);document.getElementById("ref-code").value="";loadWalletBalance();loadAvailableRefCodes();}
     async function loadAnnouncements(){var r=await fetch("/public/announcements");if(!r.ok)return;var data=await r.json();var box=document.getElementById("announcements-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="<h3>&#128226; Announcements</h3>";data.forEach(function(i){h+="<div style='padding:10px 0;border-bottom:1px solid #1e2d40;'><strong>"+esc(i.title)+"</strong>"+(i.body?"<br><span class='muted' style='font-size:0.9em;'>"+esc(i.body)+"</span>":"")+"</div>";});box.innerHTML=h;}
     async function loadPromoAds(){var r=await fetch("/public/promo-ads");if(!r.ok)return;var data=await r.json();var box=document.getElementById("promo-ads-box");if(!data.length){box.style.display="none";return;}box.style.display="block";var h="<h3>&#127381; Sponsored</h3><div style='display:flex;flex-wrap:wrap;gap:10px;'>";data.forEach(function(i){h+="<a href='"+esc(i.url)+"' target='_blank' rel='noopener' style='display:block;background:#1a1500;border:1px solid #fbbf24;border-radius:12px;padding:12px 16px;color:#fbbf24;text-decoration:none;flex:1;min-width:180px;'><strong>"+esc(i.title)+"</strong>"+(i.description?"<br><span style='color:#94a3b8;font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</a>";});h+="</div>";box.innerHTML=h;}
     var _STATIC_NEWS=[{title:"Bitcoin Price & Charts — CoinTelegraph",link:"https://cointelegraph.com/bitcoin-price"},{title:"Lightning Network Stats — mempool.space",link:"https://mempool.space/lightning"},{title:"Bitcoin News — Bitcoin Magazine",link:"https://bitcoinmagazine.com/articles"},{title:"Crypto Markets — CoinGecko",link:"https://www.coingecko.com"},{title:"Bitcoin Fees — mempool.space",link:"https://mempool.space"}];
@@ -1303,6 +1308,12 @@ app.get("/public/promo-ads", wrap(async function(req, res) {
 app.get("/public/news", wrap(async function(req, res) {
   const items = await fetchNews();
   res.json(items);
+}));
+
+// PUBLIC: show active referral codes so clients know what's available
+app.get("/public/referral-codes", wrap(async function(req, res) {
+  const r = await pool.query("SELECT code, bonus_sats, description FROM referral_codes WHERE is_active = TRUE AND uses_count < max_uses ORDER BY created_at DESC LIMIT 20");
+  res.json(r.rows);
 }));
 
 // USER: use referral code
