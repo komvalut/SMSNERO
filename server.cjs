@@ -154,34 +154,53 @@ async function initDb() {
   await pool.query(`CREATE TABLE IF NOT EXISTS user_referrals (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, referral_code_id INTEGER NOT NULL REFERENCES referral_codes(id) ON DELETE CASCADE, used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(user_id, referral_code_id))`);
   await pool.query(`CREATE TABLE IF NOT EXISTS announcements (id SERIAL PRIMARY KEY, title TEXT NOT NULL, body TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS promo_ads (id SERIAL PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, description TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, sort_order INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sms_providers (id SERIAL PRIMARY KEY, name TEXT NOT NULL, provider_type TEXT NOT NULL DEFAULT 'smspool', api_key TEXT, api_secret TEXT, api_url TEXT, is_active BOOLEAN NOT NULL DEFAULT TRUE, notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   console.log("Database initialized.");
+  setInterval(async function() {
+    try {
+      await pool.query("DELETE FROM messages WHERE created_at < NOW() - INTERVAL '1 minute' AND (number_id IS NULL OR number_id NOT IN (SELECT number_id FROM sessions WHERE expires_at > NOW()))");
+    } catch(e) { console.error("OTP cleanup error:", e.message); }
+  }, 60000);
 }
 
 let _newsCache = null;
 let _newsCacheAt = 0;
 const NEWS_TTL = 15 * 60 * 1000;
+function fetchNewsFromUrl(url, resolve) {
+  const opts = { headers: { "User-Agent": "SMSNero/1.0 (+https://smsnero.com)", "Accept": "application/rss+xml,application/xml,text/xml,*/*" } };
+  const req = https.get(url, opts, function(resp) {
+    if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+      return fetchNewsFromUrl(resp.headers.location, resolve);
+    }
+    let data = "";
+    resp.on("data", function(c) { data += c; });
+    resp.on("end", function() {
+      try {
+        const json = JSON.parse(data);
+        if (json.status === "ok" && Array.isArray(json.items) && json.items.length) {
+          const items = json.items.slice(0, 8).map(function(i) { return { title: String(i.title||"").trim(), link: String(i.link||i.url||"").trim() }; }).filter(function(i) { return i.title && i.link; });
+          if (items.length) { _newsCache = items; _newsCacheAt = Date.now(); return resolve(items); }
+        }
+      } catch(e) {}
+      const items = [];
+      const re = /<item>[\s\S]*?<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>[\s\S]*?<link[^>]*>\s*([^\s<][^<]*)<\/link>/g;
+      let m;
+      while ((m = re.exec(data)) !== null && items.length < 8) {
+        const title = m[1].replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").trim();
+        const link = m[2].trim();
+        if (title && link) items.push({ title, link });
+      }
+      if (items.length) { _newsCache = items; _newsCacheAt = Date.now(); return resolve(items); }
+      resolve(_newsCache || []);
+    });
+  });
+  req.on("error", function() { resolve(_newsCache || []); });
+  req.setTimeout(8000, function() { req.destroy(); resolve(_newsCache || []); });
+}
 function fetchNews() {
   if (_newsCache && Date.now() - _newsCacheAt < NEWS_TTL) return Promise.resolve(_newsCache);
   return new Promise(function(resolve) {
-    const req = https.get("https://cointelegraph.com/rss", function(resp) {
-      let data = "";
-      resp.on("data", function(c) { data += c; });
-      resp.on("end", function() {
-        const items = [];
-        const re = /<item>[\s\S]*?<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>[\s\S]*?<link[^>]*>\s*([^\s<][^<]*)<\/link>/g;
-        let m;
-        while ((m = re.exec(data)) !== null && items.length < 8) {
-          const title = m[1].replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").trim();
-          const link = m[2].trim();
-          if (title && link) items.push({ title, link });
-        }
-        _newsCache = items;
-        _newsCacheAt = Date.now();
-        resolve(items);
-      });
-    });
-    req.on("error", function() { resolve(_newsCache || []); });
-    req.setTimeout(6000, function() { req.destroy(); resolve(_newsCache || []); });
+    fetchNewsFromUrl("https://api.rss2json.com/v1/api.json?rss_url=https%3A%2F%2Fcointelegraph.com%2Frss&count=8", resolve);
   });
 }
 
@@ -237,8 +256,6 @@ const HTML = `<!DOCTYPE html>
     <p class="muted">Rent phone numbers and receive SMS/OTP messages. Paid via Bitcoin Lightning.</p>
     <div class="box">
       <button onclick="registerUser()">&#9889; Register</button>
-      <input id="adminPass" type="password" placeholder="admin password">
-      <button onclick="adminLogin()">Admin login</button>
       <button onclick="logout()" class="btn-secondary">Logout</button>
       <div id="status" class="muted"></div>
       <div id="wallet-bar" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid #1e2d40;align-items:center;gap:10px;flex-wrap:wrap;">
@@ -317,6 +334,12 @@ const HTML = `<!DOCTYPE html>
     <div id="announcements-box" class="box" style="display:none;margin-top:18px;"></div>
     <div id="promo-ads-box" class="box" style="display:none;margin-top:12px;"></div>
     <div id="news-box" class="box" style="margin-top:12px;"><p class="muted" style="font-size:0.9em;">Loading crypto news...</p></div>
+    <div id="admin-login-footer" style="display:none;padding:16px;background:#131926;border-radius:14px;border:1px solid #1e2d40;margin-top:12px;text-align:center;">
+      <p class="muted" style="font-size:0.85em;margin:0 0 10px;">Admin Access</p>
+      <input id="adminPass" type="password" placeholder="Admin password" style="width:170px;margin-right:6px;">
+      <button onclick="adminLogin()">&#128274; Login</button>
+    </div>
+    <p style="text-align:center;margin-top:24px;margin-bottom:4px;"><a href="#" onclick="toggleAdminLogin();return false;" style="color:#1e2d40;font-size:0.7em;text-decoration:none;letter-spacing:0.08em;">admin</a></p>
   </main>
   <script>
     var token=localStorage.getItem("smsnero_token")||"";
@@ -345,11 +368,12 @@ const HTML = `<!DOCTYPE html>
     async function doDeposit(){var amt=Number(document.getElementById("dep-amount").value);if(!amt||amt<100)return setStatus("Minimum deposit is 100 sats.",true);var r=await fetch("/wallet/deposit",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({amountSats:amt})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);_depositInvoice=d.lightning_invoice||"";var lnHtml=_depositInvoice?"<textarea style='width:100%;box-sizing:border-box;background:#111;color:#facc15;border:1px solid #444;border-radius:8px;padding:8px;font-size:0.75em;resize:none;margin-top:6px;' rows='2' readonly>"+esc(_depositInvoice)+"</textarea><br><button onclick='copyDepositInvoice()' style='margin-top:4px;padding:4px 10px;font-size:0.85em;'>Copy Invoice</button>":"";var chkHtml=d.checkout_url?"<br><a href='"+esc(d.checkout_url)+"' target='_blank' style='font-size:0.9em;'>Open in wallet</a>":"";document.getElementById("deposit-qr").innerHTML="<img src='"+esc(d.qr)+"' width='160' style='display:block;margin-bottom:6px;'>"+lnHtml+chkHtml;setStatus("Scan QR to deposit "+amt+" sats. Wallet updates automatically.",false);}
     async function loadAdminStats(){if(role!=="admin")return;var r=await fetch("/admin/stats",{headers:authH()});if(!r.ok)return;var d=await r.json();var svc=d.top_services.map(function(s){return esc(s.service)+" ("+s.cnt+")";}).join(", ")||"—";var h="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;'>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Total Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#facc15;'>"+d.total_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Today</div><div style='font-size:1.4em;font-weight:bold;color:#4ade80;'>"+d.today_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>Active Sessions</div><div style='font-size:1.4em;font-weight:bold;'>"+d.active_sessions+"</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>P2P Revenue</div><div style='font-size:1.4em;font-weight:bold;color:#a5b4fc;'>"+d.p2p_revenue+"</div><div class='muted' style='font-size:0.75em;'>sats</div></div>";h+="<div class='box' style='margin:0;text-align:center;'><div class='muted' style='font-size:0.8em;'>SMS Sent</div><div style='font-size:1.4em;font-weight:bold;'>"+d.sms_sent+"</div></div>";h+="</div><p class='muted' style='font-size:0.85em;'>Top services: "+svc+"</p>";return h;}
     function switchTab(name){_activeTab=name;["rent","p2p","send"].forEach(function(t){document.getElementById("tab-"+t).style.display=t===name?"block":"none";var btn=document.getElementById("tab-btn-"+t);btn.classList.toggle("active",t===name);});if(name==="p2p"&&token){loadP2PMarket();loadMyP2PListings();}if(name==="send"){renderSendTab();}}
+    function toggleAdminLogin(){var el=document.getElementById("admin-login-footer");el.style.display=el.style.display==="none"?"block":"none";}
     function logout(){token="";role="";localStorage.removeItem("smsnero_token");localStorage.removeItem("smsnero_role");setStatus("Logged out.",false);renderAdmin();document.getElementById("wallet-bar").style.display="none";document.getElementById("referral-bar").style.display="none";document.getElementById("deposit-form").style.display="none";document.getElementById("deposit-qr").innerHTML="";document.getElementById("numbers").innerHTML="Login or register to load numbers.";document.getElementById("sessions").innerHTML="<h3>My active numbers</h3>";document.getElementById("otp").innerHTML="<h3>OTP Inbox</h3>";document.getElementById("p2p-market").innerHTML="<p class='muted'>Login to view marketplace.</p>";document.getElementById("p2p-submit-box").style.display="none";document.getElementById("p2p-my-listings").innerHTML="";}
     async function registerUser(){var r=await fetch("/register",{method:"POST"});var d=await r.json();if(!r.ok)return setStatus(d.error||"Register error.",true);saveSession(d);setStatus("Registered. Token saved.",false);refreshAll();}
     async function adminLogin(){var pw=document.getElementById("adminPass").value;var r=await fetch("/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pw})});var d=await r.json();if(!r.ok)return setStatus(d.error||"Login failed.",true);saveSession(d);setStatus("Admin logged in.",false);refreshAll();}
     async function testSMS(){var n=prompt("Phone number (e.g. +46705536378):");if(!n)return;var t=prompt("SMS text (e.g. Your code is 123456):");if(!t)return;var r=await fetch("/test-sms",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,text:t})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Test SMS injected! OTP: "+(d.otp||"none"),false);loadMessages();}
-    async function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";var statsHtml=await loadAdminStats()||"";box.innerHTML="<h3>&#9889; Admin panel</h3>"+statsHtml+"<input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>&#9889; Add number</button> <button onclick='testSMS()' class='btn-secondary'>Test SMS</button><div id='adminList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Referral Codes</h4><div id='adminRefCodes'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#128226; Announcements</h4><div id='adminAnnouncements'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Promo Ads (Affiliate Links)</h4><p class='muted' style='font-size:0.85em;'>Your Binance, Nexo, and other referral links shown as banners to all users.</p><div id='adminPromoAds'></div>";loadAdminNums();loadAdminP2P();loadAdminRefCodes();loadAdminAnnouncements();loadAdminPromoAds();}
+    async function renderAdmin(){var box=document.getElementById("admin");if(role!=="admin"){box.style.display="none";box.innerHTML="";return;}box.style.display="block";var statsHtml=await loadAdminStats()||"";box.innerHTML="<h3>&#9889; Admin panel</h3>"+statsHtml+"<input id='an' placeholder='+46700000001'> <input id='ap' type='number' min='1' placeholder='sats'> <button onclick='addNum()'>&#9889; Add number</button> <button onclick='testSMS()' class='btn-secondary'>Test SMS</button><div id='adminList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>P2P Listings</h4><div id='adminP2PList'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Referral Codes</h4><div id='adminRefCodes'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#128226; Announcements</h4><div id='adminAnnouncements'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#127381; Promo Ads (Affiliate Links)</h4><p class='muted' style='font-size:0.85em;'>Your Binance, Nexo, and other referral links shown as banners to all users.</p><div id='adminPromoAds'></div><hr style='border-color:#1e2d40;margin:16px 0'><h4>&#128241; SMS Provider APIs</h4><p class='muted' style='font-size:0.85em;'>Connect SMSPool, SMSHero, Twilio, Vonage, Sinch and others. API keys stored securely. Unlimited providers.</p><div id='adminSmsProviders'></div>";loadAdminNums();loadAdminP2P();loadAdminRefCodes();loadAdminAnnouncements();loadAdminPromoAds();loadAdminSmsProviders();}
     var _refCodesData={};
     async function loadAdminRefCodes(){if(role!=="admin")return;var r=await fetch("/admin/referral-codes",{headers:authH()});if(!r.ok)return;var data=await r.json();_refCodesData={};var h="<div style='display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;'><input id='rc-code' placeholder='Code (e.g. SUMMER25)' style='width:150px'><input id='rc-sats' type='number' placeholder='Bonus sats' style='width:120px'><input id='rc-desc' placeholder='Description' style='width:180px'><button onclick='addRefCode()'>&#9889; Add Code</button></div>";data.forEach(function(i){_refCodesData[i.id]=i;h+="<div class='box row'><span><strong style='color:#fbbf24;'>"+esc(i.code)+"</strong> &mdash; <span class='ln-yellow'>+"+esc(i.bonus_sats)+" sats</span> &mdash; used "+esc(i.uses_count)+"/"+esc(i.max_uses)+" &mdash; <span style='color:"+(i.is_active?"#4ade80":"#fc8181")+"'>"+(i.is_active?"active":"disabled")+"</span>"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='deleteRefCode("+i.id+")' class='btn-danger' style='padding:6px 12px;'>Disable</button></div>";});document.getElementById("adminRefCodes").innerHTML=h||"<p class='muted'>No referral codes yet.</p>";}
     async function addRefCode(){var code=document.getElementById("rc-code").value.trim().toUpperCase();var sats=Number(document.getElementById("rc-sats").value);var desc=document.getElementById("rc-desc").value.trim();if(!code||!sats)return setStatus("Enter code and bonus sats.",true);var r=await fetch("/admin/referral-codes",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({code:code,bonusSats:sats,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Referral code created: "+code,false);document.getElementById("rc-code").value="";document.getElementById("rc-sats").value="";document.getElementById("rc-desc").value="";loadAdminRefCodes();}
@@ -362,6 +386,11 @@ const HTML = `<!DOCTYPE html>
     async function loadAdminPromoAds(){if(role!=="admin")return;var r=await fetch("/admin/promo-ads",{headers:authH()});if(!r.ok)return;var data=await r.json();_promoAdsData={};var h="<div style='display:flex;flex-direction:column;gap:6px;margin-bottom:10px;'><input id='pa-title' placeholder='Title (e.g. Binance - Best Exchange)' style='width:100%;'><input id='pa-url' placeholder='Your referral URL (https://...)' style='width:100%;'><input id='pa-desc' placeholder='Short description (optional)' style='width:100%;'><button onclick='addPromoAd()' style='width:fit-content;'>&#127381; Add Ad</button></div>";data.forEach(function(i){_promoAdsData[i.id]=i;h+="<div class='box row'><span><strong>"+esc(i.title)+"</strong><br><a href='"+esc(i.url)+"' target='_blank' style='font-size:0.85em;color:#ff8040;word-break:break-all;'>"+esc(i.url.length>55?i.url.slice(0,55)+"...":i.url)+"</a>"+(i.description?"<br><span class='muted' style='font-size:0.85em;'>"+esc(i.description)+"</span>":"")+"</span><button onclick='deletePromoAd("+i.id+")' class='btn-danger' style='padding:6px 12px;flex-shrink:0;'>Remove</button></div>";});document.getElementById("adminPromoAds").innerHTML=h||"<p class='muted'>No promo ads yet.</p>";}
     async function addPromoAd(){var title=document.getElementById("pa-title").value.trim();var url=document.getElementById("pa-url").value.trim();var desc=document.getElementById("pa-desc").value.trim();if(!title||!url)return setStatus("Enter title and URL.",true);if(!url.startsWith("http"))return setStatus("URL must start with https://",true);var r=await fetch("/admin/promo-ads",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({title:title,url:url,description:desc})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Promo ad added.",false);document.getElementById("pa-title").value="";document.getElementById("pa-url").value="";document.getElementById("pa-desc").value="";loadAdminPromoAds();loadPromoAds();}
     async function deletePromoAd(id){if(!confirm("Remove this promo ad?"))return;var r=await fetch("/admin/promo-ads/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Removed.",false);loadAdminPromoAds();loadPromoAds();}
+    var _smsProvidersData={};
+    async function loadAdminSmsProviders(){if(role!=="admin")return;var r=await fetch("/admin/sms-providers",{headers:authH()});if(!r.ok)return;var data=await r.json();_smsProvidersData={};var h="<div style='display:flex;flex-direction:column;gap:6px;margin-bottom:12px;'><div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;'><input id='sp-name' placeholder='Provider name (e.g. SMSPool)'><input id='sp-type' placeholder='Type (smspool / twilio / other)'><input id='sp-key' type='password' placeholder='API Key'></div><div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px;'><input id='sp-secret' type='password' placeholder='API Secret (if needed)'><input id='sp-url' placeholder='API URL (optional)'></div><input id='sp-notes' placeholder='Notes (optional)' style='margin-top:4px;'><button onclick='addSmsProvider()' style='width:fit-content;margin-top:6px;'>&#128241; Add Provider</button></div>";if(!data.length){h+="<p class='muted'>No providers added yet. Add SMSPool, Twilio, SMSHero, Vonage, Sinch, etc. Keys are hidden from clients.</p>";}data.forEach(function(i){_smsProvidersData[i.id]=i;var badge=i.is_active?"<span style='color:#4ade80;font-size:0.8em;'>&#9679; Active</span>":"<span style='color:#fc8181;font-size:0.8em;'>&#9679; Inactive</span>";h+="<div class='box row'><span><strong>"+esc(i.name)+"</strong> <span class='muted' style='font-size:0.85em;'>["+esc(i.provider_type)+"]</span> "+badge+(i.notes?"<br><span class='muted' style='font-size:0.82em;'>"+esc(i.notes)+"</span>":"")+"<br><span class='muted' style='font-size:0.8em;'>Added: "+esc(new Date(i.created_at).toLocaleDateString())+"</span></span><div style='display:flex;gap:6px;align-items:center;flex-shrink:0;'><button onclick='toggleSmsProvider("+i.id+","+(i.is_active?"false":"true")+")' class='btn-secondary' style='padding:5px 10px;font-size:0.82em;'>"+(i.is_active?"Disable":"Enable")+"</button><button onclick='deleteSmsProvider("+i.id+")' class='btn-danger' style='padding:5px 10px;font-size:0.82em;'>Remove</button></div></div>";});document.getElementById("adminSmsProviders").innerHTML=h;}
+    async function addSmsProvider(){var name=document.getElementById("sp-name").value.trim();var ptype=document.getElementById("sp-type").value.trim()||"other";var key=document.getElementById("sp-key").value.trim();var secret=document.getElementById("sp-secret").value.trim();var url=document.getElementById("sp-url").value.trim();var notes=document.getElementById("sp-notes").value.trim();if(!name)return setStatus("Enter provider name.",true);var r=await fetch("/admin/sms-providers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({name:name,provider_type:ptype,api_key:key,api_secret:secret,api_url:url,notes:notes})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Provider added.",false);["sp-name","sp-type","sp-key","sp-secret","sp-url","sp-notes"].forEach(function(id){var el=document.getElementById(id);if(el)el.value="";});loadAdminSmsProviders();}
+    async function toggleSmsProvider(id,active){var r=await fetch("/admin/sms-providers/"+id,{method:"PATCH",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({is_active:active})});if(!r.ok)return setStatus("Error.",true);loadAdminSmsProviders();}
+    async function deleteSmsProvider(id){if(!confirm("Remove this SMS provider? API key will be deleted."))return;var r=await fetch("/admin/sms-providers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Provider removed.",false);loadAdminSmsProviders();}
     async function addNum(){var n=document.getElementById("an").value.trim();var p=Number(document.getElementById("ap").value);var r=await fetch("/admin/numbers",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({number:n,priceSats:p})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Error.",true);setStatus("Number saved.",false);loadAdminNums();loadNumbers();}
     async function delNum(id){var r=await fetch("/admin/numbers/"+id,{method:"DELETE",headers:authH()});if(!r.ok)return setStatus("Error.",true);setStatus("Disabled.",false);loadAdminNums();loadNumbers();}
     async function loadAdminNums(){if(role!=="admin")return;var r=await fetch("/admin/numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();var h="";data.forEach(function(i){h+="<div class='box row'><span>"+esc(i.phone_number)+" &mdash; <strong class='ln-yellow'>"+esc(i.price_sats)+" sats</strong> <span class='muted'>"+(i.active?"active":"disabled")+"</span></span><span style='display:flex;gap:6px;'><button onclick='editPrice("+i.id+","+i.price_sats+")' class='btn-secondary' style='padding:6px 12px;'>Edit price</button><button onclick='delNum("+i.id+")' class='btn-danger' style='padding:6px 12px;'>Disable</button></span></div>";});document.getElementById("adminList").innerHTML=h||"<p class='muted'>No numbers yet.</p>";}
@@ -397,7 +426,7 @@ const HTML = `<!DOCTYPE html>
     function copyLightning(){if(!_lightningInvoice)return;navigator.clipboard.writeText(_lightningInvoice).then(function(){setStatus("Copied!",false);}).catch(function(){setStatus("Copy failed.",true);});}
     function clearQR(){document.getElementById("qr").innerHTML="";if(_pollTimer){clearInterval(_pollTimer);_pollTimer=null;}}
     function startPolling(){if(_pollTimer)clearInterval(_pollTimer);_pollTimer=setInterval(async function(){if(!token)return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();if(data.length){clearQR();setStatus("Payment confirmed! Your number is active.",false);loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});}},5000);}
-    async function buyNum(id){setStatus("Creating invoice...",false);var country=document.getElementById("selCountry")?document.getElementById("selCountry").value:"";var service=document.getElementById("selService")?document.getElementById("selService").value:"";var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id,country:country,service:service})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);if(inv.paid_from_wallet){clearQR();setStatus("Paid from wallet! "+inv.amount_sats+" sats deducted. Number is active.",false);loadWalletBalance();loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});return;}setStatus("Scan QR to pay. Waiting for confirmation...",false);_lightningInvoice=inv.lightning_invoice||"";var lnHtml="";if(_lightningInvoice){lnHtml="<textarea id='lnTxt' style='width:100%;box-sizing:border-box;background:#0d1520;color:#fbbf24;border:1px solid #2a3a50;border-radius:10px;padding:10px;font-size:0.75em;margin-top:10px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:6px;'>Copy Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;color:#ff8040;'>Open in Wallet App</a>":"";document.getElementById("qr").innerHTML="<div class='box'><h3>&#9889; Scan to Pay</h3><p>Amount: <strong class='ln-yellow'>"+esc(inv.amount_sats)+" sats</strong></p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"<p class='muted' style='font-size:0.85em;margin-top:10px;'>Auto-refreshes every 5s. Scroll down after payment to see your number.</p></div>";startPolling();}
+    async function buyNum(id){setStatus("Creating invoice...",false);var country=document.getElementById("selCountry")?document.getElementById("selCountry").value:"";var service=document.getElementById("selService")?document.getElementById("selService").value:"";var r=await fetch("/create-invoice",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({numberId:id,country:country,service:service})});var inv=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(inv.error||"Error.",true);if(inv.paid_from_wallet){clearQR();setStatus("Paid from wallet! "+inv.amount_sats+" sats deducted. Number is active.",false);loadWalletBalance();loadSessions();document.getElementById("sessions").scrollIntoView({behavior:"smooth"});return;}setStatus("Scan QR to pay. Waiting for confirmation...",false);_lightningInvoice=inv.lightning_invoice||"";if(_lightningInvoice&&typeof window.webln!=="undefined"){try{await window.webln.enable();await window.webln.sendPayment(_lightningInvoice);setStatus("Payment sent via wallet! Waiting for confirmation...",false);clearQR();startPolling();return;}catch(we){setStatus("WebLN cancelled, use QR below.",false);}}var lnHtml="";if(_lightningInvoice){lnHtml="<textarea id='lnTxt' style='width:100%;box-sizing:border-box;background:#0d1520;color:#fbbf24;border:1px solid #2a3a50;border-radius:10px;padding:10px;font-size:0.75em;margin-top:10px;resize:none;' rows='3' readonly>"+esc(_lightningInvoice)+"</textarea><br><button onclick='copyLightning()' style='margin-top:6px;'>Copy Invoice</button>";}var chkHtml=inv.checkout_url?"<br><a href='"+esc(inv.checkout_url)+"' target='_blank' style='display:inline-block;margin-top:8px;color:#ff8040;'>Open in Wallet App</a>":"";document.getElementById("qr").innerHTML="<div class='box'><h3>&#9889; Scan to Pay</h3><p>Amount: <strong class='ln-yellow'>"+esc(inv.amount_sats)+" sats</strong></p><img src='"+esc(inv.qr)+"' width='220' alt='QR'>"+lnHtml+chkHtml+"<p class='muted' style='font-size:0.85em;margin-top:10px;'>Auto-refreshes every 5s. Scroll down after payment to see your number.</p></div>";startPolling();}
     var _sessionsData={};
     async function loadSessions(){if(!token||role==="admin")return;var r=await fetch("/my-numbers",{headers:authH()});if(!r.ok)return;var data=await r.json();_sessionsData={};var h="<h3>My active numbers</h3>";if(!data.length)h+="<p class='muted'>No active numbers yet.</p>";data.forEach(function(i){_sessionsData[i.id]=i;var tags="";if(i.country)tags+="<span style='background:#1e2d40;border:1px solid #2a3a50;border-radius:6px;padding:2px 8px;font-size:0.8em;margin-right:6px;color:#94a3b8;'>"+esc(i.country)+"</span>";if(i.service)tags+="<span style='background:#1a1500;border:1px solid #fbbf24;border-radius:6px;padding:2px 8px;font-size:0.8em;color:#fbbf24;'>"+esc(i.service)+"</span>";var cd=countdown(i.expires_at);var cdColor=new Date(i.expires_at)-Date.now()<1800000?"#fc8181":"#4ade80";h+="<div class='box' style='display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;'><div><strong style='font-size:1.05em;'>"+esc(i.phone_number)+"</strong>"+(tags?" &nbsp;"+tags:"")+"<br><span style='color:"+cdColor+";font-size:0.85em;margin-top:4px;display:inline-block;'>&#9201; "+esc(cd)+"</span><span class='muted' style='font-size:0.8em;'> &mdash; "+esc(new Date(i.expires_at).toLocaleString())+"</span></div><button onclick='requestRefund("+i.id+")' class='btn-danger' style='padding:6px 12px;font-size:0.85em;flex-shrink:0;'>&#8592; Refund</button></div>";});document.getElementById("sessions").innerHTML=h;}
     async function requestRefund(id){var sess=_sessionsData[id];if(!sess)return;if(!confirm("Refund for "+sess.phone_number+"? Only possible if NO OTP was received. Sats go back to your wallet."))return;var r=await fetch("/refund-session",{method:"POST",headers:authH({"Content-Type":"application/json"}),body:JSON.stringify({sessionId:id})});var d=await r.json().catch(function(){return{error:"Error"};});if(!r.ok)return setStatus(d.error||"Refund failed.",true);setStatus("Refund successful! "+d.refunded_sats+" sats returned to your wallet.",false);loadSessions();loadWalletBalance();}
@@ -1053,6 +1082,32 @@ app.post("/admin/promo-ads", auth, adminOnly, wrap(async function(req, res) {
 }));
 app.delete("/admin/promo-ads/:id", auth, adminOnly, wrap(async function(req, res) {
   await pool.query("DELETE FROM promo_ads WHERE id = $1", [req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.get("/admin/sms-providers", auth, adminOnly, wrap(async function(req, res) {
+  const result = await pool.query("SELECT id, name, provider_type, api_url, is_active, notes, created_at FROM sms_providers ORDER BY id DESC");
+  res.json(result.rows);
+}));
+
+app.post("/admin/sms-providers", auth, adminOnly, wrap(async function(req, res) {
+  const { name, provider_type, api_key, api_secret, api_url, notes } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "Provider name required" });
+  const result = await pool.query(
+    "INSERT INTO sms_providers (name, provider_type, api_key, api_secret, api_url, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, name, provider_type, api_url, is_active, notes, created_at",
+    [name.trim(), (provider_type || "other").trim(), api_key || null, api_secret || null, api_url || null, notes || null]
+  );
+  res.json(result.rows[0]);
+}));
+
+app.patch("/admin/sms-providers/:id", auth, adminOnly, wrap(async function(req, res) {
+  const { is_active } = req.body;
+  await pool.query("UPDATE sms_providers SET is_active = $1 WHERE id = $2", [!!is_active, req.params.id]);
+  res.json({ ok: true });
+}));
+
+app.delete("/admin/sms-providers/:id", auth, adminOnly, wrap(async function(req, res) {
+  await pool.query("DELETE FROM sms_providers WHERE id = $1", [req.params.id]);
   res.json({ ok: true });
 }));
 
